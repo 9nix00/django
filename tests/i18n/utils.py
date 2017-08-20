@@ -3,16 +3,14 @@ import re
 import shutil
 import tempfile
 
-from django.utils._os import upath
-
-source_code_dir = os.path.dirname(upath(__file__))
+source_code_dir = os.path.dirname(__file__)
 
 
 def copytree(src, dst):
-    shutil.copytree(src, dst, ignore=shutil.ignore_patterns('*.pyc', '__pycache__'))
+    shutil.copytree(src, dst, ignore=shutil.ignore_patterns('__pycache__'))
 
 
-class POFileAssertionMixin(object):
+class POFileAssertionMixin:
 
     def _assertPoKeyword(self, keyword, expected_value, haystack, use_quotes=True):
         q = '"'
@@ -30,7 +28,7 @@ class POFileAssertionMixin(object):
         return self._assertPoKeyword('msgid', msgid, haystack, use_quotes=use_quotes)
 
 
-class RunInTmpDirMixin(object):
+class RunInTmpDirMixin:
     """
     Allow i18n tests that need to generate .po/.mo files to run in an isolated
     temporary filesystem tree created by tempfile.mkdtemp() that contains a
@@ -47,7 +45,8 @@ class RunInTmpDirMixin(object):
     def setUp(self):
         self._cwd = os.getcwd()
         self.work_dir = tempfile.mkdtemp(prefix='i18n_')
-        self.test_dir = os.path.abspath(os.path.join(self.work_dir, self.work_subdir))
+        # Resolve symlinks, if any, in test directory paths.
+        self.test_dir = os.path.realpath(os.path.join(self.work_dir, self.work_subdir))
         copytree(os.path.join(source_code_dir, self.work_subdir), self.test_dir)
         # Step out of the temporary working tree before removing it to avoid
         # deletion problems on Windows. Cleanup actions registered with

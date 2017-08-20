@@ -2,8 +2,6 @@
 Views and functions for serving static files. These are only to be used
 during development, and SHOULD NOT be used in a production setting.
 """
-from __future__ import unicode_literals
-
 import mimetypes
 import os
 import posixpath
@@ -12,12 +10,11 @@ import stat
 
 from django.http import (
     FileResponse, Http404, HttpResponse, HttpResponseNotModified,
-    HttpResponseRedirect,
 )
 from django.template import Context, Engine, TemplateDoesNotExist, loader
+from django.utils._os import safe_join
 from django.utils.http import http_date, parse_http_date
-from django.utils.six.moves.urllib.parse import unquote
-from django.utils.translation import ugettext as _, ugettext_lazy
+from django.utils.translation import gettext as _, gettext_lazy
 
 
 def serve(request, path, document_root=None, show_indexes=False):
@@ -36,25 +33,11 @@ def serve(request, path, document_root=None, show_indexes=False):
     but if you'd like to override it, you can create a template called
     ``static/directory_index.html``.
     """
-    path = posixpath.normpath(unquote(path))
-    path = path.lstrip('/')
-    newpath = ''
-    for part in path.split('/'):
-        if not part:
-            # Strip empty path components.
-            continue
-        drive, part = os.path.splitdrive(part)
-        head, part = os.path.split(part)
-        if part in (os.curdir, os.pardir):
-            # Strip '.' and '..' in path.
-            continue
-        newpath = os.path.join(newpath, part).replace('\\', '/')
-    if newpath and path != newpath:
-        return HttpResponseRedirect(newpath)
-    fullpath = os.path.join(document_root, newpath)
+    path = posixpath.normpath(path).lstrip('/')
+    fullpath = safe_join(document_root, path)
     if os.path.isdir(fullpath):
         if show_indexes:
-            return directory_index(newpath, fullpath)
+            return directory_index(path, fullpath)
         raise Http404(_("Directory indexes are not allowed here."))
     if not os.path.exists(fullpath):
         raise Http404(_('"%(path)s" does not exist') % {'path': fullpath})
@@ -97,7 +80,7 @@ DEFAULT_DIRECTORY_INDEX_TEMPLATE = """
   </body>
 </html>
 """
-template_translatable = ugettext_lazy("Index of %(directory)s")
+template_translatable = gettext_lazy("Index of %(directory)s")
 
 
 def directory_index(path, fullpath):
@@ -107,14 +90,17 @@ def directory_index(path, fullpath):
             'static/directory_index',
         ])
     except TemplateDoesNotExist:
-        t = Engine().from_string(DEFAULT_DIRECTORY_INDEX_TEMPLATE)
+        t = Engine(libraries={'i18n': 'django.templatetags.i18n'}).from_string(DEFAULT_DIRECTORY_INDEX_TEMPLATE)
+        c = Context()
+    else:
+        c = {}
     files = []
     for f in os.listdir(fullpath):
         if not f.startswith('.'):
             if os.path.isdir(os.path.join(fullpath, f)):
                 f += '/'
             files.append(f)
-    c = Context({
+    c.update({
         'directory': path + '/',
         'file_list': files,
     })

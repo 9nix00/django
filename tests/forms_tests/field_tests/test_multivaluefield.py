@@ -17,7 +17,7 @@ class ComplexMultiWidget(MultiWidget):
             SelectMultiple(choices=beatles),
             SplitDateTimeWidget(),
         )
-        super(ComplexMultiWidget, self).__init__(widgets, attrs)
+        super().__init__(widgets, attrs)
 
     def decompress(self, value):
         if value:
@@ -29,18 +29,15 @@ class ComplexMultiWidget(MultiWidget):
             ]
         return [None, None, None]
 
-    def format_output(self, rendered_widgets):
-        return '\n'.join(rendered_widgets)
-
 
 class ComplexField(MultiValueField):
-    def __init__(self, required=True, widget=None, label=None, initial=None):
+    def __init__(self, **kwargs):
         fields = (
             CharField(),
             MultipleChoiceField(choices=beatles),
             SplitDateTimeField(),
         )
-        super(ComplexField, self).__init__(fields, required, widget, label, initial)
+        super().__init__(fields, **kwargs)
 
     def compress(self, data_list):
         if data_list:
@@ -57,7 +54,7 @@ class MultiValueFieldTest(SimpleTestCase):
     @classmethod
     def setUpClass(cls):
         cls.field = ComplexField(widget=ComplexMultiWidget())
-        super(MultiValueFieldTest, cls).setUpClass()
+        super().setUpClass()
 
     def test_clean(self):
         self.assertEqual(
@@ -106,6 +103,10 @@ class MultiValueFieldTest(SimpleTestCase):
             ['some text', ['J', 'P'], ['2009-04-25', '11:44:00']],
         ))
 
+    def test_disabled_has_changed(self):
+        f = MultiValueField(fields=(CharField(), CharField()), disabled=True)
+        self.assertIs(f.has_changed(['x', 'x'], ['y', 'y']), False)
+
     def test_form_as_table(self):
         form = ComplexFieldForm()
         self.assertHTMLEqual(
@@ -137,8 +138,8 @@ class MultiValueFieldTest(SimpleTestCase):
             <tr><th><label for="id_field1_0">Field1:</label></th>
             <td><input type="text" name="field1_0" value="some text" id="id_field1_0" required />
             <select multiple="multiple" name="field1_1" id="id_field1_1" required>
-            <option value="J" selected="selected">John</option>
-            <option value="P" selected="selected">Paul</option>
+            <option value="J" selected>John</option>
+            <option value="P" selected>Paul</option>
             <option value="G">George</option>
             <option value="R">Ringo</option>
             </select>

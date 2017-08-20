@@ -1,17 +1,31 @@
 import copy
 import datetime
+from contextlib import suppress
+from decimal import Decimal
 
-from django.core.exceptions import FieldError
-from django.db.backends import utils as backend_utils
+from django.core.exceptions import EmptyResultSet, FieldError
 from django.db.models import fields
 from django.db.models.query_utils import Q
-from django.utils import six
+from django.utils.deconstruct import deconstructible
 from django.utils.functional import cached_property
 
 
-class Combinable(object):
+class SQLiteNumericMixin:
     """
-    Provides the ability to combine one or two objects with
+    Some expressions with output_field=DecimalField() must be cast to
+    numeric to be properly filtered.
+    """
+    def as_sqlite(self, compiler, connection, **extra_context):
+        sql, params = self.as_sql(compiler, connection, **extra_context)
+        with suppress(FieldError):
+            if self.output_field.get_internal_type() == 'DecimalField':
+                sql = 'CAST(%s AS NUMERIC)' % sql
+        return sql, params
+
+
+class Combinable:
+    """
+    Provide the ability to combine one or two objects with
     some connector. For example F('foo') + F('bar').
     """
 
@@ -30,8 +44,10 @@ class Combinable(object):
     # usage.
     BITAND = '&'
     BITOR = '|'
+    BITLEFTSHIFT = '<<'
+    BITRIGHTSHIFT = '>>'
 
-    def _combine(self, other, connector, reversed, node=None):
+    def _combine(self, other, connector, reversed):
         if not hasattr(other, 'resolve_expression'):
             # everything must be resolvable to an expression
             if isinstance(other, datetime.timedelta):
@@ -59,9 +75,6 @@ class Combinable(object):
     def __truediv__(self, other):
         return self._combine(other, self.DIV, False)
 
-    def __div__(self, other):  # Python 2 compatibility
-        return type(self).__truediv__(self, other)
-
     def __mod__(self, other):
         return self._combine(other, self.MOD, False)
 
@@ -75,6 +88,12 @@ class Combinable(object):
 
     def bitand(self, other):
         return self._combine(other, self.BITAND, False)
+
+    def bitleftshift(self, other):
+        return self._combine(other, self.BITLEFTSHIFT, False)
+
+    def bitrightshift(self, other):
+        return self._combine(other, self.BITRIGHTSHIFT, False)
 
     def __or__(self, other):
         raise NotImplementedError(
@@ -96,9 +115,6 @@ class Combinable(object):
     def __rtruediv__(self, other):
         return self._combine(other, self.DIV, True)
 
-    def __rdiv__(self, other):  # Python 2 compatibility
-        return type(self).__rtruediv__(self, other)
-
     def __rmod__(self, other):
         return self._combine(other, self.MOD, True)
 
@@ -116,21 +132,30 @@ class Combinable(object):
         )
 
 
-class BaseExpression(object):
-    """
-    Base class for all query expressions.
-    """
+@deconstructible
+class BaseExpression:
+    """Base class for all query expressions."""
 
     # aggregate specific fields
     is_summary = False
-    _output_field = None
+    _output_field_resolved_to_none = False
 
     def __init__(self, output_field=None):
         if output_field is not None:
-            self._output_field = output_field
+            self.output_field = output_field
+
+    def __getstate__(self):
+        # This method required only for Python 3.4.
+        state = self.__dict__.copy()
+        state.pop('convert_value', None)
+        return state
 
     def get_db_converters(self, connection):
-        return [self.convert_value] + self.output_field.get_db_converters(connection)
+        return (
+            []
+            if self.convert_value is self._convert_value_noop else
+            [self.convert_value]
+        ) + self.output_field.get_db_converters(connection)
 
     def get_source_expressions(self):
         return []
@@ -141,7 +166,7 @@ class BaseExpression(object):
     def _parse_expressions(self, *expressions):
         return [
             arg if hasattr(arg, 'resolve_expression') else (
-                F(arg) if isinstance(arg, six.string_types) else Value(arg)
+                F(arg) if isinstance(arg, str) else Value(arg)
             ) for arg in expressions
         ]
 
@@ -156,7 +181,7 @@ class BaseExpression(object):
         ```
         def override_as_sql(self, compiler, connection):
             # custom logic
-            return super(Expression, self).as_sql(compiler, connection)
+            return super().as_sql(compiler, connection)
         setattr(Expression, 'as_' + connection.vendor, override_as_sql)
         ```
 
@@ -167,7 +192,7 @@ class BaseExpression(object):
 
          * connection: the database connection used for the current query.
 
-        Returns: (sql, params)
+        Return: (sql, params)
           Where `sql` is a string containing ordered sql parameters to be
           replaced with the elements of the list `params`.
         """
@@ -189,7 +214,7 @@ class BaseExpression(object):
 
     def resolve_expression(self, query=None, allow_joins=True, reuse=None, summarize=False, for_save=False):
         """
-        Provides the chance to do any preprocessing or validation before being
+        Provide the chance to do any preprocessing or validation before being
         added to the query.
 
         Arguments:
@@ -200,7 +225,7 @@ class BaseExpression(object):
          * summarize: a terminal aggregate clause
          * for_save: whether this expression about to be used in a save or update
 
-        Returns: an Expression to be added to the query.
+        Return: an Expression to be added to the query.
         """
         c = self.copy()
         c.is_summary = summarize
@@ -211,9 +236,7 @@ class BaseExpression(object):
         return c
 
     def _prepare(self, field):
-        """
-        Hook used by Lookup.get_prep_lookup() to do custom preparation.
-        """
+        """Hook used by Lookup.get_prep_lookup() to do custom preparation."""
         return self
 
     @property
@@ -222,54 +245,51 @@ class BaseExpression(object):
 
     @cached_property
     def output_field(self):
-        """
-        Returns the output type of this expressions.
-        """
-        if self._output_field_or_none is None:
-            raise FieldError("Cannot resolve expression type, unknown output_field")
-        return self._output_field_or_none
+        """Return the output type of this expressions."""
+        output_field = self._resolve_output_field()
+        if output_field is None:
+            self._output_field_resolved_to_none = True
+            raise FieldError('Cannot resolve expression type, unknown output_field')
+        return output_field
 
     @cached_property
     def _output_field_or_none(self):
         """
-        Returns the output field of this expression, or None if no output type
-        can be resolved. Note that the 'output_field' property will raise
-        FieldError if no type can be resolved, but this attribute allows for
-        None values.
+        Return the output field of this expression, or None if
+        _resolve_output_field() didn't return an output type.
         """
-        if self._output_field is None:
-            self._resolve_output_field()
-        return self._output_field
+        try:
+            return self.output_field
+        except FieldError:
+            if not self._output_field_resolved_to_none:
+                raise
 
     def _resolve_output_field(self):
         """
-        Attempts to infer the output type of the expression. If the output
-        fields of all source fields match then we can simply infer the same
-        type here. This isn't always correct, but it makes sense most of the
-        time.
+        Attempt to infer the output type of the expression. If the output
+        fields of all source fields match then, simply infer the same type
+        here. This isn't always correct, but it makes sense most of the time.
 
         Consider the difference between `2 + 2` and `2 / 3`. Inferring
         the type here is a convenience for the common case. The user should
         supply their own output_field with more complex computations.
 
-        If a source does not have an `_output_field` then we exclude it from
-        this check. If all sources are `None`, then an error will be thrown
-        higher up the stack in the `output_field` property.
+        If a source's output field resolves to None, exclude it from this check.
+        If all sources are None, then an error is raised higher up the stack in
+        the output_field property.
         """
-        if self._output_field is None:
-            sources = self.get_source_fields()
-            num_sources = len(sources)
-            if num_sources == 0:
-                self._output_field = None
-            else:
-                for source in sources:
-                    if self._output_field is None:
-                        self._output_field = source
-                    if source is not None and not isinstance(self._output_field, source.__class__):
-                        raise FieldError(
-                            "Expression contains mixed types. You must set output_field")
+        sources_iter = (source for source in self.get_source_fields() if source is not None)
+        for output_field in sources_iter:
+            if any(not isinstance(output_field, source.__class__) for source in sources_iter):
+                raise FieldError('Expression contains mixed types. You must set output_field.')
+            return output_field
 
-    def convert_value(self, value, expression, connection, context):
+    @staticmethod
+    def _convert_value_noop(value, expression, connection):
+        return value
+
+    @cached_property
+    def convert_value(self):
         """
         Expressions provide their own converters because users have the option
         of manually specifying the output_field which may be a different type
@@ -277,15 +297,13 @@ class BaseExpression(object):
         """
         field = self.output_field
         internal_type = field.get_internal_type()
-        if value is None:
-            return value
-        elif internal_type == 'FloatField':
-            return float(value)
+        if internal_type == 'FloatField':
+            return lambda value, expression, connection: None if value is None else float(value)
         elif internal_type.endswith('IntegerField'):
-            return int(value)
+            return lambda value, expression, connection: None if value is None else int(value)
         elif internal_type == 'DecimalField':
-            return backend_utils.typecast_decimal(value)
-        return value
+            return lambda value, expression, connection: None if value is None else Decimal(value)
+        return self._convert_value_noop
 
     def get_lookup(self, lookup):
         return self.output_field.get_lookup(lookup)
@@ -300,9 +318,7 @@ class BaseExpression(object):
         return clone
 
     def copy(self):
-        c = copy.copy(self)
-        c.copied = True
-        return c
+        return copy.copy(self)
 
     def get_group_by_cols(self):
         if not self.contains_aggregate:
@@ -313,17 +329,14 @@ class BaseExpression(object):
         return cols
 
     def get_source_fields(self):
-        """
-        Returns the underlying field types used by this
-        aggregate.
-        """
+        """Return the underlying field types used by this aggregate."""
         return [e._output_field_or_none for e in self.get_source_expressions()]
 
-    def asc(self):
-        return OrderBy(self)
+    def asc(self, **kwargs):
+        return OrderBy(self, **kwargs)
 
-    def desc(self):
-        return OrderBy(self, descending=True)
+    def desc(self, **kwargs):
+        return OrderBy(self, descending=True, **kwargs)
 
     def reverse_ordering(self):
         return self
@@ -336,21 +349,39 @@ class BaseExpression(object):
         yield self
         for expr in self.get_source_expressions():
             if expr:
-                for inner_expr in expr.flatten():
-                    yield inner_expr
+                yield from expr.flatten()
+
+    def __eq__(self, other):
+        if self.__class__ != other.__class__:
+            return False
+        path, args, kwargs = self.deconstruct()
+        other_path, other_args, other_kwargs = other.deconstruct()
+        if (path, args) == (other_path, other_args):
+            kwargs = kwargs.copy()
+            other_kwargs = other_kwargs.copy()
+            output_field = type(kwargs.pop('output_field', None))
+            other_output_field = type(other_kwargs.pop('output_field', None))
+            if output_field == other_output_field:
+                return kwargs == other_kwargs
+        return False
+
+    def __hash__(self):
+        path, args, kwargs = self.deconstruct()
+        h = hash(path) ^ hash(args)
+        for kwarg in kwargs.items():
+            h ^= hash(kwarg)
+        return h
 
 
 class Expression(BaseExpression, Combinable):
-    """
-    An expression that can be combined with other expressions.
-    """
+    """An expression that can be combined with other expressions."""
     pass
 
 
-class CombinedExpression(Expression):
+class CombinedExpression(SQLiteNumericMixin, Expression):
 
     def __init__(self, lhs, connector, rhs, output_field=None):
-        super(CombinedExpression, self).__init__(output_field=output_field)
+        super().__init__(output_field=output_field)
         self.connector = connector
         self.lhs = lhs
         self.rhs = rhs
@@ -382,7 +413,7 @@ class CombinedExpression(Expression):
             return DurationExpression(self.lhs, self.connector, self.rhs).as_sql(compiler, connection)
         if (lhs_output and rhs_output and self.connector == self.SUB and
             lhs_output.get_internal_type() in {'DateField', 'DateTimeField', 'TimeField'} and
-                lhs_output.get_internal_type() == lhs_output.get_internal_type()):
+                lhs_output.get_internal_type() == rhs_output.get_internal_type()):
             return TemporalSubtraction(self.lhs, self.rhs).as_sql(compiler, connection)
         expressions = []
         expression_params = []
@@ -436,7 +467,7 @@ class DurationExpression(CombinedExpression):
 
 class TemporalSubtraction(CombinedExpression):
     def __init__(self, lhs, rhs):
-        super(TemporalSubtraction, self).__init__(lhs, self.SUB, rhs, output_field=fields.DurationField())
+        super().__init__(lhs, self.SUB, rhs, output_field=fields.DurationField())
 
     def as_sql(self, compiler, connection):
         connection.ops.check_expression_support(self)
@@ -445,10 +476,9 @@ class TemporalSubtraction(CombinedExpression):
         return connection.ops.subtract_temporals(self.lhs.output_field.get_internal_type(), lhs, rhs)
 
 
+@deconstructible
 class F(Combinable):
-    """
-    An object capable of resolving references to existing query objects.
-    """
+    """An object capable of resolving references to existing query objects."""
     def __init__(self, name):
         """
         Arguments:
@@ -462,23 +492,54 @@ class F(Combinable):
     def resolve_expression(self, query=None, allow_joins=True, reuse=None, summarize=False, for_save=False):
         return query.resolve_ref(self.name, allow_joins, reuse, summarize)
 
-    def asc(self):
-        return OrderBy(self)
+    def asc(self, **kwargs):
+        return OrderBy(self, **kwargs)
 
-    def desc(self):
-        return OrderBy(self, descending=True)
+    def desc(self, **kwargs):
+        return OrderBy(self, descending=True, **kwargs)
+
+    def __eq__(self, other):
+        return self.__class__ == other.__class__ and self.name == other.name
+
+    def __hash__(self):
+        return hash(self.name)
 
 
-class Func(Expression):
+class ResolvedOuterRef(F):
     """
-    An SQL function call.
+    An object that contains a reference to an outer query.
+
+    In this case, the reference to the outer query has been resolved because
+    the inner query has been used as a subquery.
     """
+    def as_sql(self, *args, **kwargs):
+        raise ValueError(
+            'This queryset contains a reference to an outer query and may '
+            'only be used in a subquery.'
+        )
+
+    def _prepare(self, output_field=None):
+        return self
+
+
+class OuterRef(F):
+    def resolve_expression(self, query=None, allow_joins=True, reuse=None, summarize=False, for_save=False):
+        if isinstance(self.name, self.__class__):
+            return self.name
+        return ResolvedOuterRef(self.name)
+
+    def _prepare(self, output_field=None):
+        return self
+
+
+class Func(SQLiteNumericMixin, Expression):
+    """An SQL function call."""
     function = None
     template = '%(function)s(%(expressions)s)'
     arg_joiner = ', '
     arity = None  # The number of arguments the function accepts.
 
-    def __init__(self, *expressions, **extra):
+    def __init__(self, *expressions, output_field=None, **extra):
         if self.arity is not None and len(expressions) != self.arity:
             raise TypeError(
                 "'%s' takes exactly %s %s (%s given)" % (
@@ -488,17 +549,21 @@ class Func(Expression):
                     len(expressions),
                 )
             )
-        output_field = extra.pop('output_field', None)
-        super(Func, self).__init__(output_field=output_field)
+        super().__init__(output_field=output_field)
         self.source_expressions = self._parse_expressions(*expressions)
         self.extra = extra
 
     def __repr__(self):
         args = self.arg_joiner.join(str(arg) for arg in self.source_expressions)
-        extra = ', '.join(str(key) + '=' + str(val) for key, val in self.extra.items())
+        extra = dict(self.extra, **self._get_repr_options())
         if extra:
+            extra = ', '.join(str(key) + '=' + str(val) for key, val in sorted(extra.items()))
             return "{}({}, {})".format(self.__class__.__name__, args, extra)
         return "{}({})".format(self.__class__.__name__, args)
+
+    def _get_repr_options(self):
+        """Return a dict of extra __init__() options to include in the repr."""
+        return {}
 
     def get_source_expressions(self):
         return self.source_expressions
@@ -535,26 +600,15 @@ class Func(Expression):
         data['expressions'] = data['field'] = arg_joiner.join(sql_parts)
         return template % data, params
 
-    def as_sqlite(self, compiler, connection):
-        sql, params = self.as_sql(compiler, connection)
-        try:
-            if self.output_field.get_internal_type() == 'DecimalField':
-                sql = 'CAST(%s AS NUMERIC)' % sql
-        except FieldError:
-            pass
-        return sql, params
-
     def copy(self):
-        copy = super(Func, self).copy()
+        copy = super().copy()
         copy.source_expressions = self.source_expressions[:]
         copy.extra = self.extra.copy()
         return copy
 
 
 class Value(Expression):
-    """
-    Represents a wrapped value as a node within an expression
-    """
+    """Represent a wrapped value as a node within an expression."""
     def __init__(self, value, output_field=None):
         """
         Arguments:
@@ -564,7 +618,7 @@ class Value(Expression):
          * output_field: an instance of the model field type that this
            expression will return, such as IntegerField() or CharField().
         """
-        super(Value, self).__init__(output_field=output_field)
+        super().__init__(output_field=output_field)
         self.value = value
 
     def __repr__(self):
@@ -573,12 +627,14 @@ class Value(Expression):
     def as_sql(self, compiler, connection):
         connection.ops.check_expression_support(self)
         val = self.value
-        # check _output_field to avoid triggering an exception
-        if self._output_field is not None:
+        output_field = self._output_field_or_none
+        if output_field is not None:
             if self.for_save:
-                val = self.output_field.get_db_prep_save(val, connection=connection)
+                val = output_field.get_db_prep_save(val, connection=connection)
             else:
-                val = self.output_field.get_db_prep_value(val, connection=connection)
+                val = output_field.get_db_prep_value(val, connection=connection)
+            if hasattr(output_field, 'get_placeholder'):
+                return output_field.get_placeholder(val, compiler, connection), [val]
         if val is None:
             # cx_Oracle does not always convert None to the appropriate
             # NULL type (like in case expressions using numbers), so we
@@ -587,7 +643,7 @@ class Value(Expression):
         return '%s', [val]
 
     def resolve_expression(self, query=None, allow_joins=True, reuse=None, summarize=False, for_save=False):
-        c = super(Value, self).resolve_expression(query, allow_joins, reuse, summarize, for_save)
+        c = super().resolve_expression(query, allow_joins, reuse, summarize, for_save)
         c.for_save = for_save
         return c
 
@@ -598,10 +654,9 @@ class Value(Expression):
 class DurationValue(Value):
     def as_sql(self, compiler, connection):
         connection.ops.check_expression_support(self)
-        if (connection.features.has_native_duration_field and
-                connection.features.driver_supports_timedelta_args):
-            return super(DurationValue, self).as_sql(compiler, connection)
-        return connection.ops.date_interval_sql(self.value)
+        if connection.features.has_native_duration_field:
+            return super().as_sql(compiler, connection)
+        return connection.ops.date_interval_sql(self.value), []
 
 
 class RawSQL(Expression):
@@ -609,7 +664,7 @@ class RawSQL(Expression):
         if output_field is None:
             output_field = fields.Field()
         self.sql, self.params = sql, params
-        super(RawSQL, self).__init__(output_field=output_field)
+        super().__init__(output_field=output_field)
 
     def __repr__(self):
         return "{}({}, {})".format(self.__class__.__name__, self.sql, self.params)
@@ -619,6 +674,12 @@ class RawSQL(Expression):
 
     def get_group_by_cols(self):
         return [self]
+
+    def __hash__(self):
+        h = hash(self.sql) ^ hash(self.output_field)
+        for param in self.params:
+            h ^= hash(param)
+        return h
 
 
 class Star(Expression):
@@ -631,7 +692,7 @@ class Star(Expression):
 
 class Random(Expression):
     def __init__(self):
-        super(Random, self).__init__(output_field=fields.FloatField())
+        super().__init__(output_field=fields.FloatField())
 
     def __repr__(self):
         return "Random()"
@@ -647,7 +708,7 @@ class Col(Expression):
     def __init__(self, alias, target, output_field=None):
         if output_field is None:
             output_field = target
-        super(Col, self).__init__(output_field=output_field)
+        super().__init__(output_field=output_field)
         self.alias, self.target = alias, target
 
     def __repr__(self):
@@ -677,7 +738,7 @@ class Ref(Expression):
     qs.annotate(sum_cost=Sum('cost')) query.
     """
     def __init__(self, refs, source):
-        super(Ref, self).__init__()
+        super().__init__()
         self.refs, self.source = refs, source
 
     def __repr__(self):
@@ -711,7 +772,7 @@ class ExpressionWrapper(Expression):
     """
 
     def __init__(self, expression, output_field):
-        super(ExpressionWrapper, self).__init__(output_field=output_field)
+        super().__init__(output_field=output_field)
         self.expression = expression
 
     def set_source_expressions(self, exprs):
@@ -735,7 +796,7 @@ class When(Expression):
             condition, lookups = Q(**lookups), None
         if condition is None or not isinstance(condition, Q) or lookups:
             raise TypeError("__init__() takes either a Q object or lookups as keyword arguments")
-        super(When, self).__init__(output_field=None)
+        super().__init__(output_field=None)
         self.condition = condition
         self.result = self._parse_expressions(then)[0]
 
@@ -799,12 +860,10 @@ class Case(Expression):
     template = 'CASE %(cases)s ELSE %(default)s END'
     case_joiner = ' '
 
-    def __init__(self, *cases, **extra):
+    def __init__(self, *cases, default=None, output_field=None, **extra):
         if not all(isinstance(case, When) for case in cases):
             raise TypeError("Positional arguments must all be When objects.")
-        default = extra.pop('default', None)
-        output_field = extra.pop('output_field', None)
-        super(Case, self).__init__(output_field)
+        super().__init__(output_field)
         self.cases = list(cases)
         self.default = self._parse_expressions(default)[0]
         self.extra = extra
@@ -831,7 +890,7 @@ class Case(Expression):
         return c
 
     def copy(self):
-        c = super(Case, self).copy()
+        c = super().copy()
         c.cases = c.cases[:]
         return c
 
@@ -844,12 +903,17 @@ class Case(Expression):
         case_parts = []
         sql_params = []
         for case in self.cases:
-            case_sql, case_params = compiler.compile(case)
+            try:
+                case_sql, case_params = compiler.compile(case)
+            except EmptyResultSet:
+                continue
             case_parts.append(case_sql)
             sql_params.extend(case_params)
+        default_sql, default_params = compiler.compile(self.default)
+        if not case_parts:
+            return default_sql, default_params
         case_joiner = case_joiner or self.case_joiner
         template_params['cases'] = case_joiner.join(case_parts)
-        default_sql, default_params = compiler.compile(self.default)
         template_params['default'] = default_sql
         sql_params.extend(default_params)
         template = template or template_params.get('template', self.template)
@@ -859,10 +923,140 @@ class Case(Expression):
         return sql, sql_params
 
 
+class Subquery(Expression):
+    """
+    An explicit subquery. It may contain OuterRef() references to the outer
+    query which will be resolved when it is applied to that query.
+    """
+    template = '(%(subquery)s)'
+
+    def __init__(self, queryset, output_field=None, **extra):
+        self.queryset = queryset
+        self.extra = extra
+        if output_field is None and len(self.queryset.query.select) == 1:
+            output_field = self.queryset.query.select[0].field
+        super().__init__(output_field)
+
+    def copy(self):
+        clone = super().copy()
+        clone.queryset = clone.queryset.all()
+        return clone
+
+    def resolve_expression(self, query=None, allow_joins=True, reuse=None, summarize=False, for_save=False):
+        clone = self.copy()
+        clone.is_summary = summarize
+        clone.queryset.query.bump_prefix(query)
+
+        # Need to recursively resolve these.
+        def resolve_all(child):
+            if hasattr(child, 'children'):
+                [resolve_all(_child) for _child in child.children]
+            if hasattr(child, 'rhs'):
+                child.rhs = resolve(child.rhs)
+
+        def resolve(child):
+            if hasattr(child, 'resolve_expression'):
+                resolved = child.resolve_expression(
+                    query=query, allow_joins=allow_joins, reuse=reuse,
+                    summarize=summarize, for_save=for_save,
+                )
+                # Add table alias to the parent query's aliases to prevent
+                # quoting.
+                if hasattr(resolved, 'alias'):
+                    clone.queryset.query.external_aliases.add(resolved.alias)
+                return resolved
+            return child
+
+        resolve_all(clone.queryset.query.where)
+
+        for key, value in clone.queryset.query.annotations.items():
+            if isinstance(value, Subquery):
+                clone.queryset.query.annotations[key] = resolve(value)
+
+        return clone
+
+    def get_source_expressions(self):
+        return [
+            x for x in [
+                getattr(expr, 'lhs', None)
+                for expr in self.queryset.query.where.children
+            ] if x
+        ]
+
+    def relabeled_clone(self, change_map):
+        clone = self.copy()
+        clone.queryset.query = clone.queryset.query.relabeled_clone(change_map)
+        clone.queryset.query.external_aliases.update(
+            alias for alias in change_map.values()
+            if alias not in clone.queryset.query.alias_map
+        )
+        return clone
+
+    def as_sql(self, compiler, connection, template=None, **extra_context):
+        connection.ops.check_expression_support(self)
+        template_params = self.extra.copy()
+        template_params.update(extra_context)
+        template_params['subquery'], sql_params = self.queryset.query.get_compiler(connection=connection).as_sql()
+
+        template = template or template_params.get('template', self.template)
+        sql = template % template_params
+        return sql, sql_params
+
+    def _prepare(self, output_field):
+        # This method will only be called if this instance is the "rhs" in an
+        # expression: the wrapping () must be removed (as the expression that
+        # contains this will provide them). SQLite evaluates ((subquery))
+        # differently than the other databases.
+        if self.template == '(%(subquery)s)':
+            clone = self.copy()
+            clone.template = '%(subquery)s'
+            return clone
+        return self
+
+
+class Exists(Subquery):
+    template = 'EXISTS(%(subquery)s)'
+
+    def __init__(self, *args, negated=False, **kwargs):
+        self.negated = negated
+        super().__init__(*args, **kwargs)
+
+    def __invert__(self):
+        return type(self)(self.queryset, negated=(not self.negated), **self.extra)
+
+    @property
+    def output_field(self):
+        return fields.BooleanField()
+
+    def resolve_expression(self, query=None, **kwargs):
+        # As a performance optimization, remove ordering since EXISTS doesn't
+        # care about it, just whether or not a row matches.
+        self.queryset = self.queryset.order_by()
+        return super().resolve_expression(query, **kwargs)
+
+    def as_sql(self, compiler, connection, template=None, **extra_context):
+        sql, params = super().as_sql(compiler, connection, template, **extra_context)
+        if self.negated:
+            sql = 'NOT {}'.format(sql)
+        return sql, params
+
+    def as_oracle(self, compiler, connection, template=None, **extra_context):
+        # Oracle doesn't allow EXISTS() in the SELECT list, so wrap it with a
+        # CASE WHEN expression. Change the template since the When expression
+        # requires a left hand side (column) to compare against.
+        sql, params = self.as_sql(compiler, connection, template, **extra_context)
+        sql = 'CASE WHEN {} THEN 1 ELSE 0 END'.format(sql)
+        return sql, params
+
+
 class OrderBy(BaseExpression):
     template = '%(expression)s %(ordering)s'
 
-    def __init__(self, expression, descending=False):
+    def __init__(self, expression, descending=False, nulls_first=False, nulls_last=False):
+        if nulls_first and nulls_last:
+            raise ValueError('nulls_first and nulls_last are mutually exclusive')
+        self.nulls_first = nulls_first
+        self.nulls_last = nulls_last
         self.descending = descending
         if not hasattr(expression, 'resolve_expression'):
             raise ValueError('expression must be an expression type')
@@ -879,6 +1073,11 @@ class OrderBy(BaseExpression):
         return [self.expression]
 
     def as_sql(self, compiler, connection, template=None, **extra_context):
+        if not template:
+            if self.nulls_last:
+                template = '%s NULLS LAST' % self.template
+            elif self.nulls_first:
+                template = '%s NULLS FIRST' % self.template
         connection.ops.check_expression_support(self)
         expression_sql, params = compiler.compile(self.expression)
         placeholders = {
@@ -888,6 +1087,22 @@ class OrderBy(BaseExpression):
         placeholders.update(extra_context)
         template = template or self.template
         return (template % placeholders).rstrip(), params
+
+    def as_sqlite(self, compiler, connection):
+        template = None
+        if self.nulls_last:
+            template = '%(expression)s IS NULL, %(expression)s %(ordering)s'
+        elif self.nulls_first:
+            template = '%(expression)s IS NOT NULL, %(expression)s %(ordering)s'
+        return self.as_sql(compiler, connection, template=template)
+
+    def as_mysql(self, compiler, connection):
+        template = None
+        if self.nulls_last:
+            template = 'IF(ISNULL(%(expression)s),1,0), %(expression)s %(ordering)s '
+        elif self.nulls_first:
+            template = 'IF(ISNULL(%(expression)s),0,1), %(expression)s %(ordering)s '
+        return self.as_sql(compiler, connection, template=template)
 
     def get_group_by_cols(self):
         cols = []

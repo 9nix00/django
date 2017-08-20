@@ -3,6 +3,7 @@ import sys
 import unittest
 import warnings
 from types import ModuleType
+from unittest import mock
 
 from django.conf import ENVIRONMENT_VARIABLE, LazySettings, Settings, settings
 from django.core.exceptions import ImproperlyConfigured
@@ -11,6 +12,7 @@ from django.test import (
     SimpleTestCase, TestCase, TransactionTestCase, modify_settings,
     override_settings, signals,
 )
+from django.test.utils import requires_tz_support
 
 
 @modify_settings(ITEMS={
@@ -24,8 +26,8 @@ class FullyDecoratedTranTestCase(TransactionTestCase):
     available_apps = []
 
     def test_override(self):
-        self.assertListEqual(settings.ITEMS, ['b', 'c', 'd'])
-        self.assertListEqual(settings.ITEMS_OUTER, [1, 2, 3])
+        self.assertEqual(settings.ITEMS, ['b', 'c', 'd'])
+        self.assertEqual(settings.ITEMS_OUTER, [1, 2, 3])
         self.assertEqual(settings.TEST, 'override')
         self.assertEqual(settings.TEST_OUTER, 'outer')
 
@@ -35,8 +37,8 @@ class FullyDecoratedTranTestCase(TransactionTestCase):
         'remove': ['d', 'c'],
     })
     def test_method_list_override(self):
-        self.assertListEqual(settings.ITEMS, ['a', 'b', 'e', 'f'])
-        self.assertListEqual(settings.ITEMS_OUTER, [1, 2, 3])
+        self.assertEqual(settings.ITEMS, ['a', 'b', 'e', 'f'])
+        self.assertEqual(settings.ITEMS_OUTER, [1, 2, 3])
 
     @modify_settings(ITEMS={
         'append': ['b'],
@@ -44,7 +46,7 @@ class FullyDecoratedTranTestCase(TransactionTestCase):
         'remove': ['a', 'c', 'e'],
     })
     def test_method_list_override_no_ops(self):
-        self.assertListEqual(settings.ITEMS, ['b', 'd'])
+        self.assertEqual(settings.ITEMS, ['b', 'd'])
 
     @modify_settings(ITEMS={
         'append': 'e',
@@ -52,12 +54,12 @@ class FullyDecoratedTranTestCase(TransactionTestCase):
         'remove': 'c',
     })
     def test_method_list_override_strings(self):
-        self.assertListEqual(settings.ITEMS, ['a', 'b', 'd', 'e'])
+        self.assertEqual(settings.ITEMS, ['a', 'b', 'd', 'e'])
 
     @modify_settings(ITEMS={'remove': ['b', 'd']})
     @modify_settings(ITEMS={'append': ['b'], 'prepend': ['d']})
     def test_method_list_override_nested_order(self):
-        self.assertListEqual(settings.ITEMS, ['d', 'c', 'b'])
+        self.assertEqual(settings.ITEMS, ['d', 'c', 'b'])
 
     @override_settings(TEST='override2')
     def test_method_override(self):
@@ -80,7 +82,7 @@ class FullyDecoratedTranTestCase(TransactionTestCase):
 class FullyDecoratedTestCase(TestCase):
 
     def test_override(self):
-        self.assertListEqual(settings.ITEMS, ['b', 'c', 'd'])
+        self.assertEqual(settings.ITEMS, ['b', 'c', 'd'])
         self.assertEqual(settings.TEST, 'override')
 
     @modify_settings(ITEMS={
@@ -90,7 +92,7 @@ class FullyDecoratedTestCase(TestCase):
     })
     @override_settings(TEST='override2')
     def test_method_override(self):
-        self.assertListEqual(settings.ITEMS, ['a', 'b', 'd', 'e'])
+        self.assertEqual(settings.ITEMS, ['a', 'b', 'd', 'e'])
         self.assertEqual(settings.TEST, 'override2')
 
 
@@ -108,14 +110,14 @@ class ClassDecoratedTestCase(ClassDecoratedTestCaseSuper):
 
     @classmethod
     def setUpClass(cls):
-        super(ClassDecoratedTestCase, cls).setUpClass()
+        super().setUpClass()
         cls.foo = getattr(settings, 'TEST', 'BUG')
 
     def test_override(self):
         self.assertEqual(settings.TEST, 'override')
 
     def test_setupclass_override(self):
-        """Test that settings are overridden within setUpClass -- refs #21281"""
+        """Settings are overridden within setUpClass (#21281)."""
         self.assertEqual(self.foo, 'override')
 
     @override_settings(TEST='override2')
@@ -127,7 +129,7 @@ class ClassDecoratedTestCase(ClassDecoratedTestCaseSuper):
         Overriding a method on a super class and then calling that method on
         the super class should not trigger infinite recursion. See #17011.
         """
-        super(ClassDecoratedTestCase, self).test_max_recursion_error()
+        super().test_max_recursion_error()
 
 
 @modify_settings(ITEMS={'append': 'mother'})
@@ -236,7 +238,7 @@ class SettingsTests(SimpleTestCase):
             getattr(settings, 'TEST')
 
     def test_settings_delete_wrapped(self):
-        with self.assertRaises(TypeError):
+        with self.assertRaisesMessage(TypeError, "can't delete _wrapped."):
             delattr(settings, '_wrapped')
 
     def test_override_settings_delete(self):
@@ -260,7 +262,7 @@ class SettingsTests(SimpleTestCase):
 
     def test_override_settings_nested(self):
         """
-        Test that override_settings uses the actual _wrapped attribute at
+        override_settings uses the actual _wrapped attribute at
         runtime, not when it was instantiated.
         """
 
@@ -286,6 +288,42 @@ class SettingsTests(SimpleTestCase):
         with self.assertRaises(AttributeError):
             getattr(settings, 'TEST2')
 
+    def test_no_secret_key(self):
+        settings_module = ModuleType('fake_settings_module')
+        sys.modules['fake_settings_module'] = settings_module
+        msg = 'The SECRET_KEY setting must not be empty.'
+        try:
+            with self.assertRaisesMessage(ImproperlyConfigured, msg):
+                Settings('fake_settings_module')
+        finally:
+            del sys.modules['fake_settings_module']
+
+    def test_no_settings_module(self):
+        msg = (
+            'Requested setting%s, but settings are not configured. You '
+            'must either define the environment variable DJANGO_SETTINGS_MODULE '
+            'or call settings.configure() before accessing settings.'
+        )
+        orig_settings = os.environ[ENVIRONMENT_VARIABLE]
+        os.environ[ENVIRONMENT_VARIABLE] = ''
+        try:
+            with self.assertRaisesMessage(ImproperlyConfigured, msg % 's'):
+                settings._setup()
+            with self.assertRaisesMessage(ImproperlyConfigured, msg % ' TEST'):
+                settings._setup('TEST')
+        finally:
+            os.environ[ENVIRONMENT_VARIABLE] = orig_settings
+
+    def test_already_configured(self):
+        with self.assertRaisesMessage(RuntimeError, 'Settings already configured.'):
+            settings.configure()
+
+    @requires_tz_support
+    @mock.patch('django.conf.global_settings.TIME_ZONE', 'test')
+    def test_incorrect_timezone(self):
+        with self.assertRaisesMessage(ValueError, 'Incorrect timezone setting: test'):
+            settings._setup()
+
 
 class TestComplexSettingOverride(SimpleTestCase):
     def setUp(self):
@@ -305,116 +343,30 @@ class TestComplexSettingOverride(SimpleTestCase):
                 self.assertEqual(settings.TEST_WARN, 'override')
 
             self.assertEqual(len(w), 1)
-            # File extension may by .py, .pyc, etc. Compare only basename.
-            self.assertEqual(os.path.splitext(w[0].filename)[0], os.path.splitext(__file__)[0])
+            self.assertEqual(w[0].filename, __file__)
             self.assertEqual(str(w[0].message), 'Overriding setting TEST_WARN can lead to unexpected behavior.')
 
 
-class TrailingSlashURLTests(SimpleTestCase):
-    """
-    Tests for the MEDIA_URL and STATIC_URL settings.
-
-    They must end with a slash to ensure there's a deterministic way to build
-    paths in templates.
-    """
-    settings_module = settings
-
-    def setUp(self):
-        self._original_media_url = self.settings_module.MEDIA_URL
-        self._original_static_url = self.settings_module.STATIC_URL
-
-    def tearDown(self):
-        self.settings_module.MEDIA_URL = self._original_media_url
-        self.settings_module.STATIC_URL = self._original_static_url
-
-    def test_blank(self):
-        """
-        The empty string is accepted, even though it doesn't end in a slash.
-        """
-        self.settings_module.MEDIA_URL = ''
-        self.assertEqual('', self.settings_module.MEDIA_URL)
-
-        self.settings_module.STATIC_URL = ''
-        self.assertEqual('', self.settings_module.STATIC_URL)
-
-    def test_end_slash(self):
-        """
-        It works if the value ends in a slash.
-        """
-        self.settings_module.MEDIA_URL = '/foo/'
-        self.assertEqual('/foo/', self.settings_module.MEDIA_URL)
-
-        self.settings_module.MEDIA_URL = 'http://media.foo.com/'
-        self.assertEqual('http://media.foo.com/', self.settings_module.MEDIA_URL)
-
-        self.settings_module.STATIC_URL = '/foo/'
-        self.assertEqual('/foo/', self.settings_module.STATIC_URL)
-
-        self.settings_module.STATIC_URL = 'http://static.foo.com/'
-        self.assertEqual('http://static.foo.com/', self.settings_module.STATIC_URL)
-
-    def test_no_end_slash(self):
-        """
-        An ImproperlyConfigured exception is raised if the value doesn't end
-        in a slash.
-        """
-        with self.assertRaises(ImproperlyConfigured):
-            self.settings_module.MEDIA_URL = '/foo'
-
-        with self.assertRaises(ImproperlyConfigured):
-            self.settings_module.MEDIA_URL = 'http://media.foo.com'
-
-        with self.assertRaises(ImproperlyConfigured):
-            self.settings_module.STATIC_URL = '/foo'
-
-        with self.assertRaises(ImproperlyConfigured):
-            self.settings_module.STATIC_URL = 'http://static.foo.com'
-
-    def test_double_slash(self):
-        """
-        If the value ends in more than one slash, presume they know what
-        they're doing.
-        """
-        self.settings_module.MEDIA_URL = '/wrong//'
-        self.assertEqual('/wrong//', self.settings_module.MEDIA_URL)
-
-        self.settings_module.MEDIA_URL = 'http://media.foo.com/wrong//'
-        self.assertEqual('http://media.foo.com/wrong//', self.settings_module.MEDIA_URL)
-
-        self.settings_module.STATIC_URL = '/wrong//'
-        self.assertEqual('/wrong//', self.settings_module.STATIC_URL)
-
-        self.settings_module.STATIC_URL = 'http://static.foo.com/wrong//'
-        self.assertEqual('http://static.foo.com/wrong//', self.settings_module.STATIC_URL)
-
-
 class SecureProxySslHeaderTest(SimpleTestCase):
-    settings_module = settings
 
-    def setUp(self):
-        self._original_setting = self.settings_module.SECURE_PROXY_SSL_HEADER
-
-    def tearDown(self):
-        self.settings_module.SECURE_PROXY_SSL_HEADER = self._original_setting
-
+    @override_settings(SECURE_PROXY_SSL_HEADER=None)
     def test_none(self):
-        self.settings_module.SECURE_PROXY_SSL_HEADER = None
         req = HttpRequest()
         self.assertIs(req.is_secure(), False)
 
+    @override_settings(SECURE_PROXY_SSL_HEADER=('HTTP_X_FORWARDED_PROTOCOL', 'https'))
     def test_set_without_xheader(self):
-        self.settings_module.SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTOCOL', 'https')
         req = HttpRequest()
         self.assertIs(req.is_secure(), False)
 
+    @override_settings(SECURE_PROXY_SSL_HEADER=('HTTP_X_FORWARDED_PROTOCOL', 'https'))
     def test_set_with_xheader_wrong(self):
-        self.settings_module.SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTOCOL', 'https')
         req = HttpRequest()
         req.META['HTTP_X_FORWARDED_PROTOCOL'] = 'wrongvalue'
         self.assertIs(req.is_secure(), False)
 
+    @override_settings(SECURE_PROXY_SSL_HEADER=('HTTP_X_FORWARDED_PROTOCOL', 'https'))
     def test_set_with_xheader_right(self):
-        self.settings_module.SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTOCOL', 'https')
         req = HttpRequest()
         req.META['HTTP_X_FORWARDED_PROTOCOL'] = 'https'
         self.assertIs(req.is_secure(), True)

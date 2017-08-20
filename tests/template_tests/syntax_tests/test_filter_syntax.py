@@ -1,6 +1,3 @@
-# coding: utf-8
-from __future__ import unicode_literals
-
 from django.template import TemplateSyntaxError
 from django.test import SimpleTestCase
 
@@ -46,7 +43,8 @@ class FilterSyntaxTests(SimpleTestCase):
         """
         Raise TemplateSyntaxError for a nonexistent filter
         """
-        with self.assertRaises(TemplateSyntaxError):
+        msg = "Invalid filter: 'does_not_exist'"
+        with self.assertRaisesMessage(TemplateSyntaxError, msg):
             self.engine.get_template('filter-syntax05')
 
     @setup({'filter-syntax06': '{{ var|fil(ter) }}'})
@@ -55,7 +53,7 @@ class FilterSyntaxTests(SimpleTestCase):
         Raise TemplateSyntaxError when trying to access a filter containing
         an illegal character
         """
-        with self.assertRaises(TemplateSyntaxError):
+        with self.assertRaisesMessage(TemplateSyntaxError, "Invalid filter: 'fil'"):
             self.engine.get_template('filter-syntax06')
 
     @setup({'filter-syntax07': "{% nothing_to_see_here %}"})
@@ -63,7 +61,11 @@ class FilterSyntaxTests(SimpleTestCase):
         """
         Raise TemplateSyntaxError for invalid block tags
         """
-        with self.assertRaises(TemplateSyntaxError):
+        msg = (
+            "Invalid block tag on line 1: 'nothing_to_see_here'. Did you "
+            "forget to register or load this tag?"
+        )
+        with self.assertRaisesMessage(TemplateSyntaxError, msg):
             self.engine.get_template('filter-syntax07')
 
     @setup({'filter-syntax08': "{% %}"})
@@ -163,8 +165,7 @@ class FilterSyntaxTests(SimpleTestCase):
     @setup({'filter-syntax18': r'{{ var }}'})
     def test_filter_syntax18(self):
         """
-        Make sure that any unicode strings are converted to bytestrings
-        in the final output.
+        Strings are converted to bytestrings in the final output.
         """
         output = self.engine.render_to_string('filter-syntax18', {'var': UTF8Class()})
         self.assertEqual(output, '\u0160\u0110\u0106\u017d\u0107\u017e\u0161\u0111')
@@ -237,3 +238,8 @@ class FilterSyntaxTests(SimpleTestCase):
         """
         with self.assertRaises(AttributeError):
             self.engine.render_to_string('filter-syntax25', {'var': SomeClass()})
+
+    @setup({'template': '{{ var.type_error_attribute }}'})
+    def test_type_error_attribute(self):
+        with self.assertRaises(TypeError):
+            self.engine.render_to_string('template', {'var': SomeClass()})

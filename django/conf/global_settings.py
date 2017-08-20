@@ -1,15 +1,14 @@
-# -*- coding: utf-8 -*-
 """
 Default Django settings. Override these with settings in the module pointed to
 by the DJANGO_SETTINGS_MODULE environment variable.
 """
-from __future__ import unicode_literals
 
 
 # This is defined here as a do-nothing function because we can't import
 # django.utils.translation -- that module depends on the settings.
 def gettext_noop(s):
     return s
+
 
 ####################
 # CORE             #
@@ -22,7 +21,9 @@ DEBUG = False
 # on a live site.
 DEBUG_PROPAGATE_EXCEPTIONS = False
 
-# Whether to use the "Etag" header. This saves bandwidth but slows down performance.
+# Whether to use the "ETag" header. This saves bandwidth but slows down performance.
+# Deprecated (RemovedInDjango21Warning) in favor of ConditionalGetMiddleware
+# which sets the ETag regardless of this setting.
 USE_ETAGS = False
 
 # People who get code error notifications.
@@ -212,6 +213,9 @@ EMAIL_TIMEOUT = None
 INSTALLED_APPS = []
 
 TEMPLATES = []
+
+# Default form rendering class.
+FORM_RENDERER = 'django.forms.renderers.DjangoTemplates'
 
 # Default email address to use for various automated correspondence from
 # the site managers.
@@ -441,12 +445,7 @@ SECURE_PROXY_SSL_HEADER = None
 # List of middleware to use. Order is important; in the request phase, these
 # middleware will be applied in the order given, and in the response
 # phase the middleware will be applied in reverse order.
-MIDDLEWARE_CLASSES = [
-    'django.middleware.common.CommonMiddleware',
-    'django.middleware.csrf.CsrfViewMiddleware',
-]
-
-MIDDLEWARE = None
+MIDDLEWARE = []
 
 ############
 # SESSIONS #
@@ -545,6 +544,7 @@ CSRF_COOKIE_SECURE = False
 CSRF_COOKIE_HTTPONLY = False
 CSRF_HEADER_NAME = 'HTTP_X_CSRFTOKEN'
 CSRF_TRUSTED_ORIGINS = []
+CSRF_USE_SESSIONS = False
 
 ############
 # MESSAGES #
@@ -629,6 +629,7 @@ SILENCED_SYSTEM_CHECKS = []
 SECURE_BROWSER_XSS_FILTER = False
 SECURE_CONTENT_TYPE_NOSNIFF = False
 SECURE_HSTS_INCLUDE_SUBDOMAINS = False
+SECURE_HSTS_PRELOAD = False
 SECURE_HSTS_SECONDS = 0
 SECURE_REDIRECT_EXEMPT = []
 SECURE_SSL_HOST = None

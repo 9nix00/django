@@ -1,7 +1,3 @@
-# -*- coding: utf-8 -*-
-from __future__ import unicode_literals
-
-import io
 import os
 import re
 import types
@@ -13,15 +9,13 @@ from django.core.files.base import ContentFile
 from django.core.validators import (
     BaseValidator, DecimalValidator, EmailValidator, FileExtensionValidator,
     MaxLengthValidator, MaxValueValidator, MinLengthValidator,
-    MinValueValidator, RegexValidator, URLValidator, int_list_validator,
-    validate_comma_separated_integer_list, validate_email,
-    validate_image_file_extension, validate_integer, validate_ipv4_address,
-    validate_ipv6_address, validate_ipv46_address, validate_slug,
-    validate_unicode_slug,
+    MinValueValidator, ProhibitNullCharactersValidator, RegexValidator,
+    URLValidator, int_list_validator, validate_comma_separated_integer_list,
+    validate_email, validate_image_file_extension, validate_integer,
+    validate_ipv4_address, validate_ipv6_address, validate_ipv46_address,
+    validate_slug, validate_unicode_slug,
 )
 from django.test import SimpleTestCase
-from django.test.utils import str_prefix
-from django.utils._os import upath
 
 try:
     from PIL import Image  # noqa
@@ -138,6 +132,7 @@ TEST_DATA = [
     (validate_ipv4_address, '25,1,1,1', ValidationError),
     (validate_ipv4_address, '25.1 .1.1', ValidationError),
     (validate_ipv4_address, '1.1.1.1\n', ValidationError),
+    (validate_ipv4_address, '٧.2٥.3٣.243', ValidationError),
 
     # validate_ipv6_address uses django.utils.ipv6, which
     # is tested in much greater detail in its own testcase
@@ -253,27 +248,39 @@ TEST_DATA = [
     (RegexValidator('a', flags=re.IGNORECASE), 'A', None),
 
     (FileExtensionValidator(['txt']), ContentFile('contents', name='fileWithUnsupportedExt.jpg'), ValidationError),
-    (FileExtensionValidator(['txt']), ContentFile('contents', name='fileWithNoExtenstion'), ValidationError),
+    (FileExtensionValidator(['txt']), ContentFile('contents', name='fileWithUnsupportedExt.JPG'), ValidationError),
+    (FileExtensionValidator(['txt']), ContentFile('contents', name='fileWithNoExtension'), ValidationError),
+    (FileExtensionValidator(['']), ContentFile('contents', name='fileWithAnExtension.txt'), ValidationError),
     (FileExtensionValidator([]), ContentFile('contents', name='file.txt'), ValidationError),
+
+    (FileExtensionValidator(['']), ContentFile('contents', name='fileWithNoExtension'), None),
     (FileExtensionValidator(['txt']), ContentFile('contents', name='file.txt'), None),
+    (FileExtensionValidator(['txt']), ContentFile('contents', name='file.TXT'), None),
+    (FileExtensionValidator(['TXT']), ContentFile('contents', name='file.txt'), None),
     (FileExtensionValidator(), ContentFile('contents', name='file.jpg'), None),
 
     (validate_image_file_extension, ContentFile('contents', name='file.jpg'), None),
     (validate_image_file_extension, ContentFile('contents', name='file.png'), None),
+    (validate_image_file_extension, ContentFile('contents', name='file.PNG'), None),
     (validate_image_file_extension, ContentFile('contents', name='file.txt'), ValidationError),
     (validate_image_file_extension, ContentFile('contents', name='file'), ValidationError),
+
+    (ProhibitNullCharactersValidator(), '\x00something', ValidationError),
+    (ProhibitNullCharactersValidator(), 'something', None),
+    (ProhibitNullCharactersValidator(), None, None),
 ]
 
 
 def create_path(filename):
-    return os.path.abspath(os.path.join(os.path.dirname(upath(__file__)), filename))
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), filename))
+
 
 # Add valid and invalid URL tests.
 # This only tests the validator without extended schemes.
-with io.open(create_path('valid_urls.txt'), encoding='utf8') as f:
+with open(create_path('valid_urls.txt'), encoding='utf8') as f:
     for url in f:
         TEST_DATA.append((URLValidator(), url.strip(), None))
-with io.open(create_path('invalid_urls.txt'), encoding='utf8') as f:
+with open(create_path('invalid_urls.txt'), encoding='utf8') as f:
     for url in f:
         TEST_DATA.append((URLValidator(), url.strip(), ValidationError))
 
@@ -317,27 +324,29 @@ def create_simple_test_method(validator, expected, value, num):
 class TestSimpleValidators(SimpleTestCase):
     def test_single_message(self):
         v = ValidationError('Not Valid')
-        self.assertEqual(str(v), str_prefix("[%(_)s'Not Valid']"))
-        self.assertEqual(repr(v), str_prefix("ValidationError([%(_)s'Not Valid'])"))
+        self.assertEqual(str(v), "['Not Valid']")
+        self.assertEqual(repr(v), "ValidationError(['Not Valid'])")
 
     def test_message_list(self):
         v = ValidationError(['First Problem', 'Second Problem'])
-        self.assertEqual(str(v), str_prefix("[%(_)s'First Problem', %(_)s'Second Problem']"))
-        self.assertEqual(repr(v), str_prefix("ValidationError([%(_)s'First Problem', %(_)s'Second Problem'])"))
+        self.assertEqual(str(v), "['First Problem', 'Second Problem']")
+        self.assertEqual(repr(v), "ValidationError(['First Problem', 'Second Problem'])")
 
     def test_message_dict(self):
         v = ValidationError({'first': ['First Problem']})
-        self.assertEqual(str(v), str_prefix("{%(_)s'first': [%(_)s'First Problem']}"))
-        self.assertEqual(repr(v), str_prefix("ValidationError({%(_)s'first': [%(_)s'First Problem']})"))
+        self.assertEqual(str(v), "{'first': ['First Problem']}")
+        self.assertEqual(repr(v), "ValidationError({'first': ['First Problem']})")
 
     def test_regex_validator_flags(self):
-        with self.assertRaises(TypeError):
+        msg = 'If the flags are set, regex must be a regular expression string.'
+        with self.assertRaisesMessage(TypeError, msg):
             RegexValidator(re.compile('a'), flags=re.IGNORECASE)
 
     def test_max_length_validator_message(self):
         v = MaxLengthValidator(16, message='"%(value)s" has more than %(limit_value)d characters.')
         with self.assertRaisesMessage(ValidationError, '"djangoproject.com" has more than 16 characters.'):
             v('djangoproject.com')
+
 
 test_counter = 0
 for validator, value, expected in TEST_DATA:
@@ -348,7 +357,7 @@ for validator, value, expected in TEST_DATA:
 
 class TestValidatorEquality(TestCase):
     """
-    Tests that validators have valid equality operators (#21638)
+    Validators have valid equality operators (#21638)
     """
 
     def test_regex_equality(self):
@@ -456,6 +465,14 @@ class TestValidatorEquality(TestCase):
             FileExtensionValidator(['txt'])
         )
         self.assertEqual(
+            FileExtensionValidator(['TXT']),
+            FileExtensionValidator(['txt'])
+        )
+        self.assertEqual(
+            FileExtensionValidator(['TXT', 'png']),
+            FileExtensionValidator(['txt', 'png'])
+        )
+        self.assertEqual(
             FileExtensionValidator(['txt']),
             FileExtensionValidator(['txt'], code='invalid_extension')
         )
@@ -474,4 +491,22 @@ class TestValidatorEquality(TestCase):
         self.assertNotEqual(
             FileExtensionValidator(['txt']),
             FileExtensionValidator(['txt'], message='custom error message')
+        )
+
+    def test_prohibit_null_characters_validator_equality(self):
+        self.assertEqual(
+            ProhibitNullCharactersValidator(message='message', code='code'),
+            ProhibitNullCharactersValidator(message='message', code='code')
+        )
+        self.assertEqual(
+            ProhibitNullCharactersValidator(),
+            ProhibitNullCharactersValidator()
+        )
+        self.assertNotEqual(
+            ProhibitNullCharactersValidator(message='message1', code='code'),
+            ProhibitNullCharactersValidator(message='message2', code='code')
+        )
+        self.assertNotEqual(
+            ProhibitNullCharactersValidator(message='message', code='code1'),
+            ProhibitNullCharactersValidator(message='message', code='code2')
         )

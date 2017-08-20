@@ -22,7 +22,7 @@ class geos_char_p(c_char_p):
 
 # ### ctypes factory classes ###
 class BinConstructor(GEOSFuncFactory):
-    "Generates a prototype for binary construction (HEX, WKB) GEOS routines."
+    "Generate a prototype for binary construction (HEX, WKB) GEOS routines."
     argtypes = [c_char_p, c_size_t]
     restype = GEOM_PTR
     errcheck = staticmethod(check_geom)
@@ -30,7 +30,7 @@ class BinConstructor(GEOSFuncFactory):
 
 # HEX & WKB output
 class BinOutput(GEOSFuncFactory):
-    "Generates a prototype for the routines that return a sized string."
+    "Generate a prototype for the routines that return a sized string."
     argtypes = [GEOM_PTR, POINTER(c_size_t)]
     restype = c_uchar_p
     errcheck = staticmethod(check_sized_string)
@@ -43,7 +43,7 @@ class GeomOutput(GEOSFuncFactory):
 
     def get_func(self, argtypes):
         self.argtypes = argtypes
-        return super(GeomOutput, self).get_func()
+        return super().get_func()
 
 
 class IntFromGeom(GEOSFuncFactory):
@@ -56,7 +56,7 @@ class IntFromGeom(GEOSFuncFactory):
             self.errcheck = check_zero
         else:
             self.errcheck = check_minus_one
-        return super(IntFromGeom, self).get_func()
+        return super().get_func()
 
 
 class StringFromGeom(GEOSFuncFactory):
@@ -67,16 +67,6 @@ class StringFromGeom(GEOSFuncFactory):
 
 
 # ### ctypes prototypes ###
-
-# Deprecated creation routines from WKB, HEX, WKT
-from_hex = BinConstructor('GEOSGeomFromHEX_buf')
-from_wkb = BinConstructor('GEOSGeomFromWKB_buf')
-from_wkt = GeomOutput('GEOSGeomFromWKT', [c_char_p])
-
-# Deprecated output routines
-to_hex = BinOutput('GEOSGeomToHEX_buf')
-to_wkb = BinOutput('GEOSGeomToWKB_buf')
-to_wkt = StringFromGeom('GEOSGeomToWKT')
 
 # The GEOS geometry type, typeid, num_coordinates and number of geometries
 geos_normalize = IntFromGeom('GEOSNormalize')

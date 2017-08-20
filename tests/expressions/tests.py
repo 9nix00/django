@@ -1,41 +1,44 @@
-from __future__ import unicode_literals
-
 import datetime
+import unittest
 import uuid
 from copy import deepcopy
 
 from django.core.exceptions import FieldError
 from django.db import DatabaseError, connection, models, transaction
-from django.db.models import TimeField, UUIDField
+from django.db.models import CharField, Q, TimeField, UUIDField
 from django.db.models.aggregates import (
     Avg, Count, Max, Min, StdDev, Sum, Variance,
 )
 from django.db.models.expressions import (
-    Case, Col, ExpressionWrapper, F, Func, OrderBy, Random, RawSQL, Ref, Value,
-    When,
+    Case, Col, Exists, ExpressionWrapper, F, Func, OrderBy, OuterRef, Random,
+    RawSQL, Ref, Subquery, Value, When,
 )
 from django.db.models.functions import (
     Coalesce, Concat, Length, Lower, Substr, Upper,
 )
-from django.test import TestCase, skipIfDBFeature, skipUnlessDBFeature
+from django.db.models.sql import constants
+from django.db.models.sql.datastructures import Join
+from django.test import SimpleTestCase, TestCase, skipUnlessDBFeature
 from django.test.utils import Approximate
-from django.utils import six
 
-from .models import UUID, Company, Employee, Experiment, Number, Time
+from .models import (
+    UUID, UUIDPK, Company, Employee, Experiment, Number, Result, SimulationRun,
+    Time,
+)
 
 
 class BasicExpressionsTests(TestCase):
     @classmethod
     def setUpTestData(cls):
-        Company.objects.create(
+        cls.example_inc = Company.objects.create(
             name="Example Inc.", num_employees=2300, num_chairs=5,
             ceo=Employee.objects.create(firstname="Joe", lastname="Smith", salary=10)
         )
-        Company.objects.create(
+        cls.foobar_ltd = Company.objects.create(
             name="Foobar Ltd.", num_employees=3, num_chairs=4,
             ceo=Employee.objects.create(firstname="Frank", lastname="Meyer", salary=20)
         )
-        Company.objects.create(
+        cls.gmbh = Company.objects.create(
             name="Test GmbH", num_employees=32, num_chairs=1,
             ceo=Employee.objects.create(firstname="Max", lastname="Mustermann", salary=30)
         )
@@ -74,7 +77,7 @@ class BasicExpressionsTests(TestCase):
         # We can filter on attribute relationships on same model obj, e.g.
         # find companies where the number of employees is greater
         # than the number of chairs.
-        self.assertQuerysetEqual(
+        self.assertSequenceEqual(
             self.company_query.filter(num_employees__gt=F("num_chairs")), [
                 {
                     "num_chairs": 5,
@@ -87,14 +90,13 @@ class BasicExpressionsTests(TestCase):
                     "num_employees": 32
                 },
             ],
-            lambda o: o
         )
 
     def test_update(self):
         # We can set one field to have the value of another field
         # Make sure we have enough chairs
         self.company_query.update(num_chairs=F("num_employees"))
-        self.assertQuerysetEqual(
+        self.assertSequenceEqual(
             self.company_query, [
                 {
                     "num_chairs": 2300,
@@ -112,14 +114,13 @@ class BasicExpressionsTests(TestCase):
                     "num_employees": 32
                 }
             ],
-            lambda o: o
         )
 
     def test_arithmetic(self):
         # We can perform arithmetic operations in expressions
         # Make sure we have 2 spare chairs
         self.company_query.update(num_chairs=F("num_employees") + 2)
-        self.assertQuerysetEqual(
+        self.assertSequenceEqual(
             self.company_query, [
                 {
                     'num_chairs': 2302,
@@ -137,7 +138,6 @@ class BasicExpressionsTests(TestCase):
                     'num_employees': 32
                 }
             ],
-            lambda o: o,
         )
 
     def test_order_of_operations(self):
@@ -145,7 +145,7 @@ class BasicExpressionsTests(TestCase):
         self. company_query.update(
             num_chairs=F('num_employees') + 2 * F('num_employees')
         )
-        self.assertQuerysetEqual(
+        self.assertSequenceEqual(
             self.company_query, [
                 {
                     'num_chairs': 6900,
@@ -163,7 +163,6 @@ class BasicExpressionsTests(TestCase):
                     'num_employees': 32
                 }
             ],
-            lambda o: o,
         )
 
     def test_parenthesis_priority(self):
@@ -171,7 +170,7 @@ class BasicExpressionsTests(TestCase):
         self.company_query.update(
             num_chairs=((F('num_employees') + 2) * F('num_employees'))
         )
-        self.assertQuerysetEqual(
+        self.assertSequenceEqual(
             self.company_query, [
                 {
                     'num_chairs': 5294600,
@@ -189,7 +188,6 @@ class BasicExpressionsTests(TestCase):
                     'num_employees': 32
                 }
             ],
-            lambda o: o,
         )
 
     def test_update_with_fk(self):
@@ -204,7 +202,7 @@ class BasicExpressionsTests(TestCase):
                 "Frank Meyer",
                 "Max Mustermann",
             ],
-            lambda c: six.text_type(c.point_of_contact),
+            lambda c: str(c.point_of_contact),
             ordered=False
         )
 
@@ -248,7 +246,8 @@ class BasicExpressionsTests(TestCase):
         )
 
         with transaction.atomic():
-            with self.assertRaises(FieldError):
+            msg = "Joined field references are not permitted in this query"
+            with self.assertRaisesMessage(FieldError, msg):
                 Company.objects.exclude(
                     ceo__firstname=F('point_of_contact__firstname')
                 ).update(name=F('point_of_contact__lastname'))
@@ -295,13 +294,15 @@ class BasicExpressionsTests(TestCase):
 
         def test():
             test_gmbh.point_of_contact = F("ceo")
-        with self.assertRaises(ValueError):
+        msg = 'F(ceo)": "Company.point_of_contact" must be a "Employee" instance.'
+        with self.assertRaisesMessage(ValueError, msg):
             test()
 
         test_gmbh.point_of_contact = test_gmbh.ceo
         test_gmbh.save()
         test_gmbh.name = F("ceo__last_name")
-        with self.assertRaises(FieldError):
+        msg = 'Joined field references are not permitted in this query'
+        with self.assertRaisesMessage(FieldError, msg):
             test_gmbh.save()
 
     def test_object_update_unsaved_objects(self):
@@ -339,22 +340,21 @@ class BasicExpressionsTests(TestCase):
         queryset = Employee.objects.filter(firstname__iexact=F('lastname'))
         self.assertQuerysetEqual(queryset, ["<Employee: Test test>"])
 
-    @skipIfDBFeature('has_case_insensitive_like')
     def test_ticket_16731_startswith_lookup(self):
         Employee.objects.create(firstname="John", lastname="Doe")
         e2 = Employee.objects.create(firstname="Jack", lastname="Jackson")
         e3 = Employee.objects.create(firstname="Jack", lastname="jackson")
-        self.assertQuerysetEqual(
+        self.assertSequenceEqual(
             Employee.objects.filter(lastname__startswith=F('firstname')),
-            [e2], lambda x: x)
-        self.assertQuerysetEqual(
-            Employee.objects.filter(lastname__istartswith=F('firstname')).order_by('pk'),
-            [e2, e3], lambda x: x)
+            [e2, e3] if connection.features.has_case_insensitive_like else [e2]
+        )
+        qs = Employee.objects.filter(lastname__istartswith=F('firstname')).order_by('pk')
+        self.assertSequenceEqual(qs, [e2, e3])
 
     def test_ticket_18375_join_reuse(self):
-        # Test that reverse multijoin F() references and the lookup target
-        # the same join. Pre #18375 the F() join was generated first, and the
-        # lookup couldn't reuse that join.
+        # Reverse multijoin F() references and the lookup target the same join.
+        # Pre #18375 the F() join was generated first and the lookup couldn't
+        # reuse that join.
         qs = Employee.objects.filter(
             company_ceo_set__num_chairs=F('company_ceo_set__num_employees'))
         self.assertEqual(str(qs.query).count('JOIN'), 1)
@@ -382,7 +382,7 @@ class BasicExpressionsTests(TestCase):
         self.assertEqual(str(qs.query).count('JOIN'), 1)
 
     def test_ticket_18375_chained_filters(self):
-        # Test that F() expressions do not reuse joins from previous filter.
+        # F() expressions do not reuse joins from previous filter.
         qs = Employee.objects.filter(
             company_ceo_set__num_employees=F('pk')
         ).filter(
@@ -390,18 +390,336 @@ class BasicExpressionsTests(TestCase):
         )
         self.assertEqual(str(qs.query).count('JOIN'), 2)
 
+    def test_outerref(self):
+        inner = Company.objects.filter(point_of_contact=OuterRef('pk'))
+        msg = (
+            'This queryset contains a reference to an outer query and may only '
+            'be used in a subquery.'
+        )
+        with self.assertRaisesMessage(ValueError, msg):
+            inner.exists()
 
-class ExpressionsTests(TestCase):
+        outer = Employee.objects.annotate(is_point_of_contact=Exists(inner))
+        self.assertIs(outer.exists(), True)
 
-    def test_F_object_deepcopy(self):
+    def test_subquery(self):
+        Company.objects.filter(name='Example Inc.').update(
+            point_of_contact=Employee.objects.get(firstname='Joe', lastname='Smith'),
+            ceo=Employee.objects.get(firstname='Max', lastname='Mustermann'),
+        )
+        Employee.objects.create(firstname='Bob', lastname='Brown', salary=40)
+        qs = Employee.objects.annotate(
+            is_point_of_contact=Exists(Company.objects.filter(point_of_contact=OuterRef('pk'))),
+            is_not_point_of_contact=~Exists(Company.objects.filter(point_of_contact=OuterRef('pk'))),
+            is_ceo_of_small_company=Exists(Company.objects.filter(num_employees__lt=200, ceo=OuterRef('pk'))),
+            is_ceo_small_2=~~Exists(Company.objects.filter(num_employees__lt=200, ceo=OuterRef('pk'))),
+            largest_company=Subquery(Company.objects.order_by('-num_employees').filter(
+                models.Q(ceo=OuterRef('pk')) | models.Q(point_of_contact=OuterRef('pk'))
+            ).values('name')[:1], output_field=models.CharField())
+        ).values(
+            'firstname',
+            'is_point_of_contact',
+            'is_not_point_of_contact',
+            'is_ceo_of_small_company',
+            'is_ceo_small_2',
+            'largest_company',
+        ).order_by('firstname')
+
+        results = list(qs)
+        # Could use Coalesce(subq, Value('')) instead except for the bug in
+        # cx_Oracle mentioned in #23843.
+        bob = results[0]
+        if bob['largest_company'] == '' and connection.features.interprets_empty_strings_as_nulls:
+            bob['largest_company'] = None
+
+        self.assertEqual(results, [
+            {
+                'firstname': 'Bob',
+                'is_point_of_contact': False,
+                'is_not_point_of_contact': True,
+                'is_ceo_of_small_company': False,
+                'is_ceo_small_2': False,
+                'largest_company': None,
+            },
+            {
+                'firstname': 'Frank',
+                'is_point_of_contact': False,
+                'is_not_point_of_contact': True,
+                'is_ceo_of_small_company': True,
+                'is_ceo_small_2': True,
+                'largest_company': 'Foobar Ltd.',
+            },
+            {
+                'firstname': 'Joe',
+                'is_point_of_contact': True,
+                'is_not_point_of_contact': False,
+                'is_ceo_of_small_company': False,
+                'is_ceo_small_2': False,
+                'largest_company': 'Example Inc.',
+            },
+            {
+                'firstname': 'Max',
+                'is_point_of_contact': False,
+                'is_not_point_of_contact': True,
+                'is_ceo_of_small_company': True,
+                'is_ceo_small_2': True,
+                'largest_company': 'Example Inc.'
+            }
+        ])
+        # A less elegant way to write the same query: this uses a LEFT OUTER
+        # JOIN and an IS NULL, inside a WHERE NOT IN which is probably less
+        # efficient than EXISTS.
+        self.assertCountEqual(
+            qs.filter(is_point_of_contact=True).values('pk'),
+            Employee.objects.exclude(company_point_of_contact_set=None).values('pk')
+        )
+
+    def test_in_subquery(self):
+        # This is a contrived test (and you really wouldn't write this query),
+        # but it is a succinct way to test the __in=Subquery() construct.
+        small_companies = Company.objects.filter(num_employees__lt=200).values('pk')
+        subquery_test = Company.objects.filter(pk__in=Subquery(small_companies))
+        self.assertCountEqual(subquery_test, [self.foobar_ltd, self.gmbh])
+        subquery_test2 = Company.objects.filter(pk=Subquery(small_companies.filter(num_employees=3)))
+        self.assertCountEqual(subquery_test2, [self.foobar_ltd])
+
+    def test_uuid_pk_subquery(self):
+        u = UUIDPK.objects.create()
+        UUID.objects.create(uuid_fk=u)
+        qs = UUIDPK.objects.filter(id__in=Subquery(UUID.objects.values('uuid_fk__id')))
+        self.assertCountEqual(qs, [u])
+
+    def test_nested_subquery(self):
+        inner = Company.objects.filter(point_of_contact=OuterRef('pk'))
+        outer = Employee.objects.annotate(is_point_of_contact=Exists(inner))
+        contrived = Employee.objects.annotate(
+            is_point_of_contact=Subquery(
+                outer.filter(pk=OuterRef('pk')).values('is_point_of_contact'),
+                output_field=models.BooleanField(),
+            ),
+        )
+        self.assertCountEqual(contrived.values_list(), outer.values_list())
+
+    def test_nested_subquery_outer_ref_2(self):
+        first = Time.objects.create(time='09:00')
+        second = Time.objects.create(time='17:00')
+        third = Time.objects.create(time='21:00')
+        SimulationRun.objects.bulk_create([
+            SimulationRun(start=first, end=second, midpoint='12:00'),
+            SimulationRun(start=first, end=third, midpoint='15:00'),
+            SimulationRun(start=second, end=first, midpoint='00:00'),
+        ])
+        inner = Time.objects.filter(time=OuterRef(OuterRef('time')), pk=OuterRef('start')).values('time')
+        middle = SimulationRun.objects.annotate(other=Subquery(inner)).values('other')[:1]
+        outer = Time.objects.annotate(other=Subquery(middle, output_field=models.TimeField()))
+        # This is a contrived example. It exercises the double OuterRef form.
+        self.assertCountEqual(outer, [first, second, third])
+
+    def test_annotations_within_subquery(self):
+        Company.objects.filter(num_employees__lt=50).update(ceo=Employee.objects.get(firstname='Frank'))
+        inner = Company.objects.filter(
+            ceo=OuterRef('pk')
+        ).values('ceo').annotate(total_employees=models.Sum('num_employees')).values('total_employees')
+        outer = Employee.objects.annotate(total_employees=Subquery(inner)).filter(salary__lte=Subquery(inner))
+        self.assertSequenceEqual(
+            outer.order_by('-total_employees').values('salary', 'total_employees'),
+            [{'salary': 10, 'total_employees': 2300}, {'salary': 20, 'total_employees': 35}],
+        )
+
+    def test_subquery_references_joined_table_twice(self):
+        inner = Company.objects.filter(
+            num_chairs__gte=OuterRef('ceo__salary'),
+            num_employees__gte=OuterRef('point_of_contact__salary'),
+        )
+        # Another contrived example (there is no need to have a subquery here)
+        outer = Company.objects.filter(pk__in=Subquery(inner.values('pk')))
+        self.assertFalse(outer.exists())
+
+    def test_explicit_output_field(self):
+        class FuncA(Func):
+            output_field = models.CharField()
+
+        class FuncB(Func):
+            pass
+
+        expr = FuncB(FuncA())
+        self.assertEqual(expr.output_field, FuncA.output_field)
+
+
+class IterableLookupInnerExpressionsTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        ceo = Employee.objects.create(firstname='Just', lastname='Doit', salary=30)
+        # MySQL requires that the values calculated for expressions don't pass
+        # outside of the field's range, so it's inconvenient to use the values
+        # in the more general tests.
+        Company.objects.create(name='5020 Ltd', num_employees=50, num_chairs=20, ceo=ceo)
+        Company.objects.create(name='5040 Ltd', num_employees=50, num_chairs=40, ceo=ceo)
+        Company.objects.create(name='5050 Ltd', num_employees=50, num_chairs=50, ceo=ceo)
+        Company.objects.create(name='5060 Ltd', num_employees=50, num_chairs=60, ceo=ceo)
+        Company.objects.create(name='99300 Ltd', num_employees=99, num_chairs=300, ceo=ceo)
+
+    def test_in_lookup_allows_F_expressions_and_expressions_for_integers(self):
+        # __in lookups can use F() expressions for integers.
+        queryset = Company.objects.filter(num_employees__in=([F('num_chairs') - 10]))
+        self.assertQuerysetEqual(queryset, ['<Company: 5060 Ltd>'], ordered=False)
+        self.assertQuerysetEqual(
+            Company.objects.filter(num_employees__in=([F('num_chairs') - 10, F('num_chairs') + 10])),
+            ['<Company: 5040 Ltd>', '<Company: 5060 Ltd>'],
+            ordered=False
+        )
+        self.assertQuerysetEqual(
+            Company.objects.filter(
+                num_employees__in=([F('num_chairs') - 10, F('num_chairs'), F('num_chairs') + 10])
+            ),
+            ['<Company: 5040 Ltd>', '<Company: 5050 Ltd>', '<Company: 5060 Ltd>'],
+            ordered=False
+        )
+
+    def test_expressions_in_lookups_join_choice(self):
+        midpoint = datetime.time(13, 0)
+        t1 = Time.objects.create(time=datetime.time(12, 0))
+        t2 = Time.objects.create(time=datetime.time(14, 0))
+        SimulationRun.objects.create(start=t1, end=t2, midpoint=midpoint)
+        SimulationRun.objects.create(start=t1, end=None, midpoint=midpoint)
+        SimulationRun.objects.create(start=None, end=t2, midpoint=midpoint)
+        SimulationRun.objects.create(start=None, end=None, midpoint=midpoint)
+
+        queryset = SimulationRun.objects.filter(midpoint__range=[F('start__time'), F('end__time')])
+        self.assertQuerysetEqual(
+            queryset,
+            ['<SimulationRun: 13:00:00 (12:00:00 to 14:00:00)>'],
+            ordered=False
+        )
+        for alias in queryset.query.alias_map.values():
+            if isinstance(alias, Join):
+                self.assertEqual(alias.join_type, constants.INNER)
+
+        queryset = SimulationRun.objects.exclude(midpoint__range=[F('start__time'), F('end__time')])
+        self.assertQuerysetEqual(queryset, [], ordered=False)
+        for alias in queryset.query.alias_map.values():
+            if isinstance(alias, Join):
+                self.assertEqual(alias.join_type, constants.LOUTER)
+
+    def test_range_lookup_allows_F_expressions_and_expressions_for_integers(self):
+        # Range lookups can use F() expressions for integers.
+        Company.objects.filter(num_employees__exact=F("num_chairs"))
+        self.assertQuerysetEqual(
+            Company.objects.filter(num_employees__range=(F('num_chairs'), 100)),
+            ['<Company: 5020 Ltd>', '<Company: 5040 Ltd>', '<Company: 5050 Ltd>'],
+            ordered=False
+        )
+        self.assertQuerysetEqual(
+            Company.objects.filter(num_employees__range=(F('num_chairs') - 10, F('num_chairs') + 10)),
+            ['<Company: 5040 Ltd>', '<Company: 5050 Ltd>', '<Company: 5060 Ltd>'],
+            ordered=False
+        )
+        self.assertQuerysetEqual(
+            Company.objects.filter(num_employees__range=(F('num_chairs') - 10, 100)),
+            ['<Company: 5020 Ltd>', '<Company: 5040 Ltd>', '<Company: 5050 Ltd>', '<Company: 5060 Ltd>'],
+            ordered=False
+        )
+        self.assertQuerysetEqual(
+            Company.objects.filter(num_employees__range=(1, 100)),
+            [
+                '<Company: 5020 Ltd>', '<Company: 5040 Ltd>', '<Company: 5050 Ltd>',
+                '<Company: 5060 Ltd>', '<Company: 99300 Ltd>',
+            ],
+            ordered=False
+        )
+
+    @unittest.skipUnless(connection.vendor == 'sqlite',
+                         "This defensive test only works on databases that don't validate parameter types")
+    def test_complex_expressions_do_not_introduce_sql_injection_via_untrusted_string_inclusion(self):
         """
-        Make sure F objects can be deepcopied (#23492)
+        This tests that SQL injection isn't possible using compilation of
+        expressions in iterable filters, as their compilation happens before
+        the main query compilation. It's limited to SQLite, as PostgreSQL,
+        Oracle and other vendors have defense in depth against this by type
+        checking. Testing against SQLite (the most permissive of the built-in
+        databases) demonstrates that the problem doesn't exist while keeping
+        the test simple.
         """
+        queryset = Company.objects.filter(name__in=[F('num_chairs') + '1)) OR ((1==1'])
+        self.assertQuerysetEqual(queryset, [], ordered=False)
+
+    def test_in_lookup_allows_F_expressions_and_expressions_for_datetimes(self):
+        start = datetime.datetime(2016, 2, 3, 15, 0, 0)
+        end = datetime.datetime(2016, 2, 5, 15, 0, 0)
+        experiment_1 = Experiment.objects.create(
+            name='Integrity testing',
+            assigned=start.date(),
+            start=start,
+            end=end,
+            completed=end.date(),
+            estimated_time=end - start,
+        )
+        experiment_2 = Experiment.objects.create(
+            name='Taste testing',
+            assigned=start.date(),
+            start=start,
+            end=end,
+            completed=end.date(),
+            estimated_time=end - start,
+        )
+        Result.objects.create(
+            experiment=experiment_1,
+            result_time=datetime.datetime(2016, 2, 4, 15, 0, 0),
+        )
+        Result.objects.create(
+            experiment=experiment_1,
+            result_time=datetime.datetime(2016, 3, 10, 2, 0, 0),
+        )
+        Result.objects.create(
+            experiment=experiment_2,
+            result_time=datetime.datetime(2016, 1, 8, 5, 0, 0),
+        )
+
+        within_experiment_time = [F('experiment__start'), F('experiment__end')]
+        queryset = Result.objects.filter(result_time__range=within_experiment_time)
+        self.assertQuerysetEqual(queryset, ["<Result: Result at 2016-02-04 15:00:00>"])
+
+        within_experiment_time = [F('experiment__start'), F('experiment__end')]
+        queryset = Result.objects.filter(result_time__range=within_experiment_time)
+        self.assertQuerysetEqual(queryset, ["<Result: Result at 2016-02-04 15:00:00>"])
+
+
+class FTests(SimpleTestCase):
+
+    def test_deepcopy(self):
         f = F("foo")
         g = deepcopy(f)
         self.assertEqual(f.name, g.name)
 
-    def test_f_reuse(self):
+    def test_deconstruct(self):
+        f = F('name')
+        path, args, kwargs = f.deconstruct()
+        self.assertEqual(path, 'django.db.models.expressions.F')
+        self.assertEqual(args, (f.name,))
+        self.assertEqual(kwargs, {})
+
+    def test_equal(self):
+        f = F('name')
+        same_f = F('name')
+        other_f = F('username')
+        self.assertEqual(f, same_f)
+        self.assertNotEqual(f, other_f)
+
+    def test_hash(self):
+        d = {F('name'): 'Bob'}
+        self.assertIn(F('name'), d)
+        self.assertEqual(d[F('name')], 'Bob')
+
+    def test_not_equal_Value(self):
+        f = F('name')
+        value = Value('name')
+        self.assertNotEqual(f, value)
+        self.assertNotEqual(value, f)
+
+
+class ExpressionsTests(TestCase):
+
+    def test_F_reuse(self):
         f = F('id')
         n = Number.objects.create(integer=-1)
         c = Company.objects.create(
@@ -417,8 +735,8 @@ class ExpressionsTests(TestCase):
         self.assertEqual(c_qs.get(), c)
 
     def test_patterns_escape(self):
-        """
-        Test that special characters (e.g. %, _ and \) stored in database are
+        r"""
+        Special characters (e.g. %, _ and \) stored in database are
         properly escaped when using a pattern lookup with an expression
         refs #16731
         """
@@ -449,8 +767,8 @@ class ExpressionsTests(TestCase):
             ordered=False)
 
     def test_insensitive_patterns_escape(self):
-        """
-        Test that special characters (e.g. %, _ and \) stored in database are
+        r"""
+        Special characters (e.g. %, _ and \) stored in database are
         properly escaped when using a case insensitive pattern lookup with an
         expression -- refs #16731
         """
@@ -553,13 +871,15 @@ class ExpressionsNumericTests(TestCase):
         self.assertEqual(Number.objects.get(pk=n.pk).float, Approximate(256.900, places=3))
 
     def test_incorrect_field_expression(self):
-        with six.assertRaisesRegex(self, FieldError, "Cannot resolve keyword u?'nope' into field.*"):
+        with self.assertRaisesMessage(FieldError, "Cannot resolve keyword 'nope' into field."):
             list(Employee.objects.filter(firstname=F('nope')))
 
 
 class ExpressionOperatorTests(TestCase):
-    def setUp(self):
-        self.n = Number.objects.create(integer=42, float=15.5)
+    @classmethod
+    def setUpTestData(cls):
+        cls.n = Number.objects.create(integer=42, float=15.5)
+        cls.n1 = Number.objects.create(integer=-42, float=-15.5)
 
     def test_lefthand_addition(self):
         # LH Addition of floats and integers
@@ -602,16 +922,28 @@ class ExpressionOperatorTests(TestCase):
     def test_lefthand_bitwise_and(self):
         # LH Bitwise ands on integers
         Number.objects.filter(pk=self.n.pk).update(integer=F('integer').bitand(56))
+        Number.objects.filter(pk=self.n1.pk).update(integer=F('integer').bitand(-56))
 
         self.assertEqual(Number.objects.get(pk=self.n.pk).integer, 40)
+        self.assertEqual(Number.objects.get(pk=self.n1.pk).integer, -64)
         self.assertEqual(Number.objects.get(pk=self.n.pk).float, Approximate(15.500, places=3))
 
-    @skipUnlessDBFeature('supports_bitwise_or')
+    def test_lefthand_bitwise_left_shift_operator(self):
+        Number.objects.update(integer=F('integer').bitleftshift(2))
+        self.assertEqual(Number.objects.get(pk=self.n.pk).integer, 168)
+        self.assertEqual(Number.objects.get(pk=self.n1.pk).integer, -168)
+
+    def test_lefthand_bitwise_right_shift_operator(self):
+        Number.objects.update(integer=F('integer').bitrightshift(2))
+        self.assertEqual(Number.objects.get(pk=self.n.pk).integer, 10)
+        self.assertEqual(Number.objects.get(pk=self.n1.pk).integer, -11)
+
     def test_lefthand_bitwise_or(self):
         # LH Bitwise or on integers
-        Number.objects.filter(pk=self.n.pk).update(integer=F('integer').bitor(48))
+        Number.objects.update(integer=F('integer').bitor(48))
 
         self.assertEqual(Number.objects.get(pk=self.n.pk).integer, 58)
+        self.assertEqual(Number.objects.get(pk=self.n1.pk).integer, -10)
         self.assertEqual(Number.objects.get(pk=self.n.pk).float, Approximate(15.500, places=3))
 
     def test_lefthand_power(self):
@@ -676,6 +1008,7 @@ class FTimeDeltaTests(TestCase):
         delta2 = datetime.timedelta(seconds=44)
         delta3 = datetime.timedelta(hours=21, minutes=8)
         delta4 = datetime.timedelta(days=10)
+        delta5 = datetime.timedelta(days=90)
 
         # Test data is set so that deltas and delays will be
         # strictly increasing.
@@ -739,6 +1072,18 @@ class FTimeDeltaTests(TestCase):
         cls.deltas.append(delta4)
         cls.delays.append(e4.start - datetime.datetime.combine(e4.assigned, midnight))
         cls.days_long.append(e4.completed - e4.assigned)
+
+        # e5: started a month after assignment, very long duration
+        delay = datetime.timedelta(30)
+        end = stime + delay + delta5
+        e5 = Experiment.objects.create(
+            name='e5', assigned=sday, start=stime + delay, end=end,
+            completed=end.date(), estimated_time=delta5,
+        )
+        cls.deltas.append(delta5)
+        cls.delays.append(e5.start - datetime.datetime.combine(e5.assigned, midnight))
+        cls.days_long.append(e5.completed - e5.assigned)
+
         cls.expnames = [e.name for e in Experiment.objects.all()]
 
     def test_multiple_query_compilation(self):
@@ -862,7 +1207,10 @@ class FTimeDeltaTests(TestCase):
         )
 
         at_least_5_days = {e.name for e in queryset.filter(completion_duration__gte=datetime.timedelta(days=5))}
-        self.assertEqual(at_least_5_days, {'e3', 'e4'})
+        self.assertEqual(at_least_5_days, {'e3', 'e4', 'e5'})
+
+        at_least_120_days = {e.name for e in queryset.filter(completion_duration__gte=datetime.timedelta(days=120))}
+        self.assertEqual(at_least_120_days, {'e5'})
 
         less_than_5_days = {e.name for e in queryset.filter(completion_duration__lt=datetime.timedelta(days=5))}
         expected = {'e0', 'e2'}
@@ -906,7 +1254,33 @@ class FTimeDeltaTests(TestCase):
         over_estimate = Experiment.objects.exclude(name='e1').filter(
             completed__gt=self.stime + F('estimated_time'),
         ).order_by('name')
-        self.assertQuerysetEqual(over_estimate, ['e3', 'e4'], lambda e: e.name)
+        self.assertQuerysetEqual(over_estimate, ['e3', 'e4', 'e5'], lambda e: e.name)
+
+    def test_date_minus_duration(self):
+        more_than_4_days = Experiment.objects.filter(
+            assigned__lt=F('completed') - Value(datetime.timedelta(days=4), output_field=models.DurationField())
+        )
+        self.assertQuerysetEqual(more_than_4_days, ['e3', 'e4', 'e5'], lambda e: e.name)
+
+    def test_negative_timedelta_update(self):
+        # subtract 30 seconds, 30 minutes, 2 hours and 2 days
+        experiments = Experiment.objects.filter(name='e0').annotate(
+            start_sub_seconds=F('start') + datetime.timedelta(seconds=-30),
+        ).annotate(
+            start_sub_minutes=F('start_sub_seconds') + datetime.timedelta(minutes=-30),
+        ).annotate(
+            start_sub_hours=F('start_sub_minutes') + datetime.timedelta(hours=-2),
+        ).annotate(
+            new_start=F('start_sub_hours') + datetime.timedelta(days=-2),
+        )
+        expected_start = datetime.datetime(2010, 6, 23, 9, 45, 0)
+        if connection.features.supports_microsecond_precision:
+            # subtract 30 microseconds
+            experiments = experiments.annotate(new_start=F('new_start') + datetime.timedelta(microseconds=-30))
+            expected_start += datetime.timedelta(microseconds=+746970)
+        experiments.update(start=F('new_start'))
+        e0 = Experiment.objects.get(name='e0')
+        self.assertEqual(e0.start, expected_start)
 
 
 class ValueTests(TestCase):
@@ -919,6 +1293,42 @@ class ValueTests(TestCase):
         UUID.objects.create()
         UUID.objects.update(uuid=Value(uuid.UUID('12345678901234567890123456789012'), output_field=UUIDField()))
         self.assertEqual(UUID.objects.get().uuid, uuid.UUID('12345678901234567890123456789012'))
+
+    def test_deconstruct(self):
+        value = Value('name')
+        path, args, kwargs = value.deconstruct()
+        self.assertEqual(path, 'django.db.models.expressions.Value')
+        self.assertEqual(args, (value.value,))
+        self.assertEqual(kwargs, {})
+
+    def test_deconstruct_output_field(self):
+        value = Value('name', output_field=CharField())
+        path, args, kwargs = value.deconstruct()
+        self.assertEqual(path, 'django.db.models.expressions.Value')
+        self.assertEqual(args, (value.value,))
+        self.assertEqual(len(kwargs), 1)
+        self.assertEqual(kwargs['output_field'].deconstruct(), CharField().deconstruct())
+
+    def test_equal(self):
+        value = Value('name')
+        same_value = Value('name')
+        other_value = Value('username')
+        self.assertEqual(value, same_value)
+        self.assertNotEqual(value, other_value)
+
+    def test_hash(self):
+        d = {Value('name'): 'Bob'}
+        self.assertIn(Value('name'), d)
+        self.assertEqual(d[Value('name')], 'Bob')
+
+    def test_equal_output_field(self):
+        value = Value('name', output_field=CharField())
+        same_value = Value('name', output_field=CharField())
+        other_value = Value('name', output_field=TimeField())
+        no_output_field = Value('name')
+        self.assertEqual(value, same_value)
+        self.assertNotEqual(value, other_value)
+        self.assertNotEqual(value, no_output_field)
 
 
 class ReprTests(TestCase):
@@ -959,3 +1369,16 @@ class ReprTests(TestCase):
         self.assertEqual(repr(StdDev('a')), "StdDev(F(a), sample=False)")
         self.assertEqual(repr(Sum('a')), "Sum(F(a))")
         self.assertEqual(repr(Variance('a', sample=True)), "Variance(F(a), sample=True)")
+
+    def test_filtered_aggregates(self):
+        filter = Q(a=1)
+        self.assertEqual(repr(Avg('a', filter=filter)), "Avg(F(a), filter=(AND: ('a', 1)))")
+        self.assertEqual(repr(Count('a', filter=filter)), "Count(F(a), distinct=False, filter=(AND: ('a', 1)))")
+        self.assertEqual(repr(Max('a', filter=filter)), "Max(F(a), filter=(AND: ('a', 1)))")
+        self.assertEqual(repr(Min('a', filter=filter)), "Min(F(a), filter=(AND: ('a', 1)))")
+        self.assertEqual(repr(StdDev('a', filter=filter)), "StdDev(F(a), filter=(AND: ('a', 1)), sample=False)")
+        self.assertEqual(repr(Sum('a', filter=filter)), "Sum(F(a), filter=(AND: ('a', 1)))")
+        self.assertEqual(
+            repr(Variance('a', sample=True, filter=filter)),
+            "Variance(F(a), filter=(AND: ('a', 1)), sample=True)"
+        )

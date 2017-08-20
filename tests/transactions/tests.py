@@ -1,5 +1,3 @@
-from __future__ import unicode_literals
-
 import sys
 import threading
 import time
@@ -301,20 +299,21 @@ class AtomicMergeTests(TransactionTestCase):
 class AtomicErrorsTests(TransactionTestCase):
 
     available_apps = ['transactions']
+    forbidden_atomic_msg = "This is forbidden when an 'atomic' block is active."
 
     def test_atomic_prevents_setting_autocommit(self):
         autocommit = transaction.get_autocommit()
         with transaction.atomic():
-            with self.assertRaises(transaction.TransactionManagementError):
+            with self.assertRaisesMessage(transaction.TransactionManagementError, self.forbidden_atomic_msg):
                 transaction.set_autocommit(not autocommit)
         # Make sure autocommit wasn't changed.
         self.assertEqual(connection.autocommit, autocommit)
 
     def test_atomic_prevents_calling_transaction_methods(self):
         with transaction.atomic():
-            with self.assertRaises(transaction.TransactionManagementError):
+            with self.assertRaisesMessage(transaction.TransactionManagementError, self.forbidden_atomic_msg):
                 transaction.commit()
-            with self.assertRaises(transaction.TransactionManagementError):
+            with self.assertRaisesMessage(transaction.TransactionManagementError, self.forbidden_atomic_msg):
                 transaction.rollback()
 
     def test_atomic_prevents_queries_in_broken_transaction(self):
@@ -324,7 +323,11 @@ class AtomicErrorsTests(TransactionTestCase):
             with self.assertRaises(IntegrityError):
                 r2.save(force_insert=True)
             # The transaction is marked as needing rollback.
-            with self.assertRaises(transaction.TransactionManagementError):
+            msg = (
+                "An error occurred in the current transaction. You can't "
+                "execute queries until the end of the 'atomic' block."
+            )
+            with self.assertRaisesMessage(transaction.TransactionManagementError, msg):
                 r2.save(force_update=True)
         self.assertEqual(Reporter.objects.get(pk=r1.pk).last_name, "Haddock")
 
@@ -363,18 +366,17 @@ class AtomicMySQLTests(TransactionTestCase):
     @skipIf(threading is None, "Test requires threading")
     def test_implicit_savepoint_rollback(self):
         """MySQL implicitly rolls back savepoints when it deadlocks (#22291)."""
+        Reporter.objects.create(id=1)
+        Reporter.objects.create(id=2)
 
-        other_thread_ready = threading.Event()
+        main_thread_ready = threading.Event()
 
         def other_thread():
             try:
                 with transaction.atomic():
-                    Reporter.objects.create(id=1, first_name="Tintin")
-                    other_thread_ready.set()
-                    # We cannot synchronize the two threads with an event here
-                    # because the main thread locks. Sleep for a little while.
-                    time.sleep(1)
-                    # 2) ... and this line deadlocks. (see below for 1)
+                    Reporter.objects.select_for_update().get(id=1)
+                    main_thread_ready.wait()
+                    # 1) This line locks... (see below for 2)
                     Reporter.objects.exclude(id=1).update(id=2)
             finally:
                 # This is the thread-local connection, not the main connection.
@@ -382,14 +384,18 @@ class AtomicMySQLTests(TransactionTestCase):
 
         other_thread = threading.Thread(target=other_thread)
         other_thread.start()
-        other_thread_ready.wait()
 
         with self.assertRaisesMessage(OperationalError, 'Deadlock found'):
             # Double atomic to enter a transaction and create a savepoint.
             with transaction.atomic():
                 with transaction.atomic():
-                    # 1) This line locks... (see above for 2)
-                    Reporter.objects.create(id=1, first_name="Tintin")
+                    Reporter.objects.select_for_update().get(id=2)
+                    main_thread_ready.set()
+                    # The two threads can't be synchronized with an event here
+                    # because the other thread locks. Sleep for a little while.
+                    time.sleep(1)
+                    # 2) ... and this line deadlocks. (see above for 1)
+                    Reporter.objects.exclude(id=2).update(id=1)
 
         other_thread.join()
 
@@ -401,7 +407,7 @@ class AtomicMiscTests(TransactionTestCase):
     def test_wrap_callable_instance(self):
         """#20028 -- Atomic must support wrapping callable instances."""
 
-        class Callable(object):
+        class Callable:
             def __call__(self):
                 pass
 
@@ -430,8 +436,28 @@ class AtomicMiscTests(TransactionTestCase):
                 # This is expected to fail because the savepoint no longer exists.
                 connection.savepoint_rollback(sid)
 
-    @skipIf(connection.features.autocommits_when_autocommit_is_off,
-            "This test requires a non-autocommit mode that doesn't autocommit.")
+
+@skipIf(
+    connection.features.autocommits_when_autocommit_is_off,
+    "This test requires a non-autocommit mode that doesn't autocommit."
+)
+class NonAutocommitTests(TransactionTestCase):
+
+    available_apps = []
+
+    def test_orm_query_after_error_and_rollback(self):
+        """
+        ORM queries are allowed after an error and a rollback in non-autocommit
+        mode (#27504).
+        """
+        transaction.set_autocommit(False)
+        r1 = Reporter.objects.create(first_name='Archibald', last_name='Haddock')
+        r2 = Reporter(first_name='Cuthbert', last_name='Calculus', id=r1.id)
+        with self.assertRaises(IntegrityError):
+            r2.save(force_insert=True)
+        transaction.rollback()
+        Reporter.objects.last()
+
     def test_orm_query_without_autocommit(self):
         """#24921 -- ORM queries must be possible after set_autocommit(False)."""
         transaction.set_autocommit(False)

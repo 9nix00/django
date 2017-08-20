@@ -1,3 +1,5 @@
+from contextlib import suppress
+
 from django.conf import settings
 from django.contrib import auth
 from django.contrib.auth import load_backend
@@ -22,19 +24,6 @@ class AuthenticationMiddleware(MiddlewareMixin):
             "'django.contrib.auth.middleware.AuthenticationMiddleware'."
         ) % ("_CLASSES" if settings.MIDDLEWARE is None else "")
         request.user = SimpleLazyObject(lambda: get_user(request))
-
-
-class SessionAuthenticationMiddleware(MiddlewareMixin):
-    """
-    Formerly, a middleware for invalidating a user's sessions that don't
-    correspond to the user's current session authentication hash. However, it
-    caused the "Vary: Cookie" header on all responses.
-
-    It's now a shim to allow a single settings file to more easily support
-    multiple versions of Django. Will be RemovedInDjango20Warning.
-    """
-    def process_request(self, request):
-        pass
 
 
 class RemoteUserMiddleware(MiddlewareMixin):
@@ -88,7 +77,7 @@ class RemoteUserMiddleware(MiddlewareMixin):
 
         # We are seeing this user for the first time in this session, attempt
         # to authenticate the user.
-        user = auth.authenticate(remote_user=username)
+        user = auth.authenticate(request, remote_user=username)
         if user:
             # User is valid.  Set request.user and persist user in the session
             # by logging the user in.
@@ -97,20 +86,18 @@ class RemoteUserMiddleware(MiddlewareMixin):
 
     def clean_username(self, username, request):
         """
-        Allows the backend to clean the username, if the backend defines a
+        Allow the backend to clean the username, if the backend defines a
         clean_username method.
         """
         backend_str = request.session[auth.BACKEND_SESSION_KEY]
         backend = auth.load_backend(backend_str)
-        try:
+        with suppress(AttributeError):  # Backend has no clean_username method.
             username = backend.clean_username(username)
-        except AttributeError:  # Backend has no clean_username method.
-            pass
         return username
 
     def _remove_invalid_user(self, request):
         """
-        Removes the current authenticated user in the request which is invalid
+        Remove the current authenticated user in the request which is invalid
         but only if the user is authenticated via the RemoteUserBackend.
         """
         try:

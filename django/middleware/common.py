@@ -1,42 +1,43 @@
 import re
+import warnings
+from urllib.parse import urlparse
 
-from django import http
 from django.conf import settings
 from django.core.exceptions import PermissionDenied
 from django.core.mail import mail_managers
+from django.http import HttpResponsePermanentRedirect
 from django.urls import is_valid_path
-from django.utils.cache import get_conditional_response, set_response_etag
-from django.utils.deprecation import MiddlewareMixin
-from django.utils.encoding import force_text
-from django.utils.http import unquote_etag
-from django.utils.six.moves.urllib.parse import urlparse
+from django.utils.cache import (
+    cc_delim_re, get_conditional_response, set_response_etag,
+)
+from django.utils.deprecation import MiddlewareMixin, RemovedInDjango21Warning
 
 
 class CommonMiddleware(MiddlewareMixin):
     """
     "Common" middleware for taking care of some basic operations:
 
-        - Forbids access to User-Agents in settings.DISALLOWED_USER_AGENTS
+        - Forbid access to User-Agents in settings.DISALLOWED_USER_AGENTS
 
         - URL rewriting: Based on the APPEND_SLASH and PREPEND_WWW settings,
-          this middleware appends missing slashes and/or prepends missing
-          "www."s.
+          append missing slashes and/or prepends missing "www."s.
 
             - If APPEND_SLASH is set and the initial URL doesn't end with a
-              slash, and it is not found in urlpatterns, a new URL is formed by
+              slash, and it is not found in urlpatterns, form a new URL by
               appending a slash at the end. If this new URL is found in
-              urlpatterns, then an HTTP-redirect is returned to this new URL;
-              otherwise the initial URL is processed as usual.
+              urlpatterns, return an HTTP redirect to this new URL; otherwise
+              process the initial URL as usual.
 
           This behavior can be customized by subclassing CommonMiddleware and
           overriding the response_redirect_class attribute.
 
         - ETags: If the USE_ETAGS setting is set, ETags will be calculated from
           the entire page content and Not Modified responses will be returned
-          appropriately.
+          appropriately. USE_ETAGS is deprecated in favor of
+          ConditionalGetMiddleware.
     """
 
-    response_redirect_class = http.HttpResponsePermanentRedirect
+    response_redirect_class = HttpResponsePermanentRedirect
 
     def process_request(self, request):
         """
@@ -71,7 +72,7 @@ class CommonMiddleware(MiddlewareMixin):
         Return True if settings.APPEND_SLASH is True and appending a slash to
         the request path turns an invalid path into a valid one.
         """
-        if settings.APPEND_SLASH and not request.get_full_path().endswith('/'):
+        if settings.APPEND_SLASH and not request.path_info.endswith('/'):
             urlconf = getattr(request, 'urlconf', None)
             return (
                 not is_valid_path(request.path_info, urlconf) and
@@ -113,14 +114,21 @@ class CommonMiddleware(MiddlewareMixin):
             if self.should_redirect_with_slash(request):
                 return self.response_redirect_class(self.get_full_path_with_slash(request))
 
-        if settings.USE_ETAGS:
+        if settings.USE_ETAGS and self.needs_etag(response):
+            warnings.warn(
+                "The USE_ETAGS setting is deprecated in favor of "
+                "ConditionalGetMiddleware which sets the ETag regardless of "
+                "the setting. CommonMiddleware won't do ETag processing in "
+                "Django 2.1.",
+                RemovedInDjango21Warning
+            )
             if not response.has_header('ETag'):
                 set_response_etag(response)
 
             if response.has_header('ETag'):
                 return get_conditional_response(
                     request,
-                    etag=unquote_etag(response['ETag']),
+                    etag=response['ETag'],
                     response=response,
                 )
         # Add the Content-Length header to non-streaming responses if not
@@ -130,20 +138,23 @@ class CommonMiddleware(MiddlewareMixin):
 
         return response
 
+    def needs_etag(self, response):
+        """Return True if an ETag header should be added to response."""
+        cache_control_headers = cc_delim_re.split(response.get('Cache-Control', ''))
+        return all(header.lower() != 'no-store' for header in cache_control_headers)
+
 
 class BrokenLinkEmailsMiddleware(MiddlewareMixin):
 
     def process_response(self, request, response):
-        """
-        Send broken link emails for relevant 404 NOT FOUND responses.
-        """
+        """Send broken link emails for relevant 404 NOT FOUND responses."""
         if response.status_code == 404 and not settings.DEBUG:
             domain = request.get_host()
             path = request.get_full_path()
-            referer = force_text(request.META.get('HTTP_REFERER', ''), errors='replace')
+            referer = request.META.get('HTTP_REFERER', '')
 
             if not self.is_ignorable_request(request, path, domain, referer):
-                ua = force_text(request.META.get('HTTP_USER_AGENT', '<none>'), errors='replace')
+                ua = request.META.get('HTTP_USER_AGENT', '<none>')
                 ip = request.META.get('REMOTE_ADDR', '<none>')
                 mail_managers(
                     "Broken %slink on %s" % (
@@ -157,7 +168,8 @@ class BrokenLinkEmailsMiddleware(MiddlewareMixin):
 
     def is_internal_request(self, domain, referer):
         """
-        Returns True if the referring URL is the same domain as the current request.
+        Return True if the referring URL is the same domain as the current
+        request.
         """
         # Different subdomains are treated as different domains.
         return bool(re.match("^https?://%s/" % re.escape(domain), referer))

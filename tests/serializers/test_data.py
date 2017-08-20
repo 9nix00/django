@@ -6,8 +6,6 @@ test case that is capable of testing the capabilities of
 the serializers. This includes all valid data values, plus
 forward, backwards and self references.
 """
-from __future__ import unicode_literals
-
 import datetime
 import decimal
 import uuid
@@ -15,23 +13,22 @@ import uuid
 from django.core import serializers
 from django.db import connection, models
 from django.test import TestCase
-from django.utils import six
 
 from .models import (
     Anchor, AutoNowDateTimeData, BigIntegerData, BinaryData, BooleanData,
-    BooleanPKData, CharData, CharPKData, DateData, DateTimeData, DecimalData,
-    DecimalPKData, EmailData, EmailPKData, ExplicitInheritBaseModel, FileData,
-    FilePathData, FilePathPKData, FKData, FKDataToField, FKDataToO2O,
-    FKSelfData, FKToUUID, FloatData, FloatPKData, GenericData,
-    GenericIPAddressData, GenericIPAddressPKData, InheritAbstractModel,
-    InheritBaseModel, IntegerData, IntegerPKData, Intermediate, LengthModel,
-    M2MData, M2MIntermediateData, M2MSelfData, ModifyingSaveData,
-    NullBooleanData, O2OData, PositiveIntegerData, PositiveIntegerPKData,
-    PositiveSmallIntegerData, PositiveSmallIntegerPKData, SlugData, SlugPKData,
-    SmallData, SmallPKData, Tag, TextData, TimeData, UniqueAnchor, UUIDData,
+    BooleanPKData, CharData, CharPKData, DateData, DatePKData, DateTimeData,
+    DateTimePKData, DecimalData, DecimalPKData, EmailData, EmailPKData,
+    ExplicitInheritBaseModel, FileData, FilePathData, FilePathPKData, FKData,
+    FKDataToField, FKDataToO2O, FKSelfData, FKToUUID, FloatData, FloatPKData,
+    GenericData, GenericIPAddressData, GenericIPAddressPKData,
+    InheritAbstractModel, InheritBaseModel, IntegerData, IntegerPKData,
+    Intermediate, LengthModel, M2MData, M2MIntermediateData, M2MSelfData,
+    ModifyingSaveData, NullBooleanData, O2OData, PositiveIntegerData,
+    PositiveIntegerPKData, PositiveSmallIntegerData,
+    PositiveSmallIntegerPKData, SlugData, SlugPKData, SmallData, SmallPKData,
+    Tag, TextData, TimeData, UniqueAnchor, UUIDData,
 )
 from .tests import register_tests
-
 
 # A set of functions that can be used to recreate
 # test data objects of various kinds.
@@ -182,6 +179,7 @@ def inherited_compare(testcase, pk, klass, data):
     for key, value in data.items():
         testcase.assertEqual(value, getattr(instance, key))
 
+
 # Define some data types. Each data type is
 # actually a pair of functions; one to create
 # and one to compare objects of that type
@@ -198,7 +196,7 @@ uuid_obj = uuid.uuid4()
 
 test_data = [
     # Format: (data type, PK value, Model Class, data)
-    (data_obj, 1, BinaryData, six.memoryview(b"\x05\xFD\x00")),
+    (data_obj, 1, BinaryData, memoryview(b"\x05\xFD\x00")),
     (data_obj, 2, BinaryData, None),
     (data_obj, 5, BooleanData, True),
     (data_obj, 6, BooleanData, False),
@@ -320,8 +318,8 @@ The end."""),
     (pk_obj, 601, BooleanPKData, True),
     (pk_obj, 602, BooleanPKData, False),
     (pk_obj, 610, CharPKData, "Test Char PKData"),
-    # (pk_obj, 620, DatePKData, datetime.date(2006, 6, 16)),
-    # (pk_obj, 630, DateTimePKData, datetime.datetime(2006, 6, 16, 10, 42, 37)),
+    (pk_obj, 620, DatePKData, datetime.date(2006, 6, 16)),
+    (pk_obj, 630, DateTimePKData, datetime.datetime(2006, 6, 16, 10, 42, 37)),
     (pk_obj, 640, EmailPKData, "hovercraft@example.com"),
     # (pk_obj, 650, FilePKData, 'file:///foo/bar/whiz.txt'),
     (pk_obj, 660, FilePathPKData, "/foo/bar/whiz.txt"),

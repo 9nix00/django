@@ -1,29 +1,24 @@
 "File-based cache backend"
-import errno
 import glob
 import hashlib
-import io
 import os
+import pickle
 import random
 import tempfile
 import time
 import zlib
+from contextlib import suppress
 
 from django.core.cache.backends.base import DEFAULT_TIMEOUT, BaseCache
 from django.core.files.move import file_move_safe
 from django.utils.encoding import force_bytes
-
-try:
-    from django.utils.six.moves import cPickle as pickle
-except ImportError:
-    import pickle
 
 
 class FileBasedCache(BaseCache):
     cache_suffix = '.djcache'
 
     def __init__(self, dir, params):
-        super(FileBasedCache, self).__init__(params)
+        super().__init__(params)
         self._dir = os.path.abspath(dir)
         self._createdir()
 
@@ -35,13 +30,10 @@ class FileBasedCache(BaseCache):
 
     def get(self, key, default=None, version=None):
         fname = self._key_to_file(key, version)
-        try:
-            with io.open(fname, 'rb') as f:
+        with suppress(FileNotFoundError):
+            with open(fname, 'rb') as f:
                 if not self._is_expired(f):
                     return pickle.loads(zlib.decompress(f.read()))
-        except IOError as e:
-            if e.errno != errno.ENOENT:
-                raise
         return default
 
     def set(self, key, value, timeout=DEFAULT_TIMEOUT, version=None):
@@ -51,7 +43,7 @@ class FileBasedCache(BaseCache):
         fd, tmp_path = tempfile.mkstemp(dir=self._dir)
         renamed = False
         try:
-            with io.open(fd, 'wb') as f:
+            with open(fd, 'wb') as f:
                 expiry = self.get_backend_timeout(timeout)
                 f.write(pickle.dumps(expiry, pickle.HIGHEST_PROTOCOL))
                 f.write(zlib.compress(pickle.dumps(value, pickle.HIGHEST_PROTOCOL)))
@@ -67,24 +59,20 @@ class FileBasedCache(BaseCache):
     def _delete(self, fname):
         if not fname.startswith(self._dir) or not os.path.exists(fname):
             return
-        try:
+        with suppress(FileNotFoundError):
+            # The file may have been removed by another process.
             os.remove(fname)
-        except OSError as e:
-            # ENOENT can happen if the cache file is removed (by another
-            # process) after the os.path.exists check.
-            if e.errno != errno.ENOENT:
-                raise
 
     def has_key(self, key, version=None):
         fname = self._key_to_file(key, version)
         if os.path.exists(fname):
-            with io.open(fname, 'rb') as f:
+            with open(fname, 'rb') as f:
                 return not self._is_expired(f)
         return False
 
     def _cull(self):
         """
-        Removes random cache entries if max_entries is reached at a ratio
+        Remove random cache entries if max_entries is reached at a ratio
         of num_entries / cull_frequency. A value of 0 for CULL_FREQUENCY means
         that the entire cache will be purged.
         """
@@ -102,13 +90,8 @@ class FileBasedCache(BaseCache):
 
     def _createdir(self):
         if not os.path.exists(self._dir):
-            try:
+            with suppress(FileExistsError):
                 os.makedirs(self._dir, 0o700)
-            except OSError as e:
-                if e.errno != errno.EEXIST:
-                    raise EnvironmentError(
-                        "Cache directory '%s' does not exist "
-                        "and could not be created'" % self._dir)
 
     def _key_to_file(self, key, version=None):
         """
@@ -131,8 +114,7 @@ class FileBasedCache(BaseCache):
 
     def _is_expired(self, f):
         """
-        Takes an open cache file and determines if it has expired,
-        deletes the file if it is has passed its expiry time.
+        Take an open cache file `f` and delete it if it's expired.
         """
         exp = pickle.load(f)
         if exp is not None and exp < time.time():

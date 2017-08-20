@@ -1,4 +1,7 @@
-from django.db import models
+from unittest import skipIf
+
+from django import forms
+from django.db import connection, models
 from django.test import TestCase
 
 from .models import Post
@@ -16,6 +19,11 @@ class TextFieldTests(TestCase):
         self.assertIsNone(tf1.formfield().max_length)
         self.assertEqual(2345, tf2.formfield().max_length)
 
+    def test_choices_generates_select_widget(self):
+        """A TextField with choices uses a Select widget."""
+        f = models.TextField(choices=[('A', 'A'), ('B', 'B')])
+        self.assertIsInstance(f.formfield().widget, forms.Select)
+
     def test_to_python(self):
         """TextField.to_python() should return a string."""
         f = models.TextField()
@@ -23,3 +31,9 @@ class TextFieldTests(TestCase):
 
     def test_lookup_integer_in_textfield(self):
         self.assertEqual(Post.objects.filter(body=24).count(), 0)
+
+    @skipIf(connection.vendor == 'mysql', 'Running on MySQL requires utf8mb4 encoding (#18392)')
+    def test_emoji(self):
+        p = Post.objects.create(title='Whatever', body='Smile 😀.')
+        p.refresh_from_db()
+        self.assertEqual(p.body, 'Smile 😀.')

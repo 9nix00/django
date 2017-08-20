@@ -1,12 +1,9 @@
-from __future__ import unicode_literals
-
 from operator import attrgetter
 
 from django.core.exceptions import FieldError, ValidationError
 from django.db import connection, models
 from django.test import SimpleTestCase, TestCase
 from django.test.utils import CaptureQueriesContext, isolate_apps
-from django.utils import six
 
 from .models import (
     Base, Chef, CommonInfo, GrandChild, GrandParent, ItalianRestaurant,
@@ -27,17 +24,16 @@ class ModelInheritanceTests(TestCase):
 
         s = Student.objects.create(name="Pebbles", age=5, school_class="1B")
 
-        self.assertEqual(six.text_type(w1), "Worker Fred")
-        self.assertEqual(six.text_type(s), "Student Pebbles")
+        self.assertEqual(str(w1), "Worker Fred")
+        self.assertEqual(str(s), "Student Pebbles")
 
         # The children inherit the Meta class of their parents (if they don't
         # specify their own).
-        self.assertQuerysetEqual(
+        self.assertSequenceEqual(
             Worker.objects.values("name"), [
                 {"name": "Barney"},
                 {"name": "Fred"},
             ],
-            lambda o: o
         )
 
         # Since Student does not subclass CommonInfo's Meta, it has the effect
@@ -47,7 +43,7 @@ class ModelInheritanceTests(TestCase):
 
         # However, the CommonInfo class cannot be used as a normal model (it
         # doesn't exist as a model).
-        with self.assertRaises(AttributeError):
+        with self.assertRaisesMessage(AttributeError, "'CommonInfo' has no attribute 'objects'"):
             CommonInfo.objects.all()
 
     def test_reverse_relation_for_different_hierarchy_tree(self):
@@ -55,7 +51,12 @@ class ModelInheritanceTests(TestCase):
         # Restaurant object cannot access that reverse relation, since it's not
         # part of the Place-Supplier Hierarchy.
         self.assertQuerysetEqual(Place.objects.filter(supplier__name="foo"), [])
-        with self.assertRaises(FieldError):
+        msg = (
+            "Cannot resolve keyword 'supplier' into field. Choices are: "
+            "address, chef, chef_id, id, italianrestaurant, lot, name, "
+            "place_ptr, place_ptr_id, provider, rating, serves_hot_dogs, serves_pizza"
+        )
+        with self.assertRaisesMessage(FieldError, msg):
             Restaurant.objects.filter(supplier__name="foo")
 
     def test_model_with_distinct_accessors(self):
@@ -69,7 +70,8 @@ class ModelInheritanceTests(TestCase):
 
         # The Post model doesn't have an attribute called
         # 'attached_%(class)s_set'.
-        with self.assertRaises(AttributeError):
+        msg = "'Post' object has no attribute 'attached_%(class)s_set'"
+        with self.assertRaisesMessage(AttributeError, msg):
             getattr(post, "attached_%(class)s_set")
 
     def test_model_with_distinct_related_query_name(self):
@@ -110,9 +112,8 @@ class ModelInheritanceTests(TestCase):
 
     def test_update_parent_filtering(self):
         """
-        Test that updating a field of a model subclass doesn't issue an UPDATE
-        query constrained by an inner query.
-        Refs #10399
+        Updating a field of a model subclass doesn't issue an UPDATE
+        query constrained by an inner query (#10399).
         """
         supplier = Supplier.objects.create(
             name='Central market',
@@ -313,11 +314,10 @@ class ModelInheritanceDataTests(TestCase):
 
     def test_values_works_on_parent_model_fields(self):
         # The values() command also works on fields from parent models.
-        self.assertQuerysetEqual(
+        self.assertSequenceEqual(
             ItalianRestaurant.objects.values("name", "rating"), [
                 {"rating": 4, "name": "Ristorante Miron"},
             ],
-            lambda o: o
         )
 
     def test_select_related_works_on_parent_model_fields(self):
@@ -338,12 +338,12 @@ class ModelInheritanceDataTests(TestCase):
         qs = (Restaurant.objects.select_related("italianrestaurant")
               .defer("italianrestaurant__serves_gnocchi").order_by("rating"))
 
-        # Test that the field was actually deferred
+        # The field was actually deferred
         with self.assertNumQueries(2):
             objs = list(qs.all())
             self.assertTrue(objs[1].italianrestaurant.serves_gnocchi)
 
-        # Test that model fields where assigned correct values
+        # Model fields where assigned correct values
         self.assertEqual(qs[0].name, 'Demon Dogs')
         self.assertEqual(qs[0].rating, 2)
         self.assertEqual(qs[1].italianrestaurant.name, 'Ristorante Miron')
@@ -351,8 +351,7 @@ class ModelInheritanceDataTests(TestCase):
 
     def test_update_query_counts(self):
         """
-        Test that update queries do not generate non-necessary queries.
-        Refs #18304.
+        Update queries do not generate unnecessary queries (#18304).
         """
         with self.assertNumQueries(3):
             self.italian_restaurant.save()

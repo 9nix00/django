@@ -1,44 +1,23 @@
 """
-SQLite3 backend for django.
-
-Works with either the pysqlite2 module or the sqlite3 module in the
-standard library.
+SQLite3 backend for the sqlite3 module in the standard library.
 """
-from __future__ import unicode_literals
-
-import datetime
 import decimal
+import math
 import re
 import warnings
+from sqlite3 import dbapi2 as Database
 
-from django.conf import settings
+import pytz
+
+from django.core.exceptions import ImproperlyConfigured
 from django.db import utils
 from django.db.backends import utils as backend_utils
 from django.db.backends.base.base import BaseDatabaseWrapper
-from django.db.backends.base.validation import BaseDatabaseValidation
-from django.utils import six, timezone
+from django.utils import timezone
 from django.utils.dateparse import (
     parse_date, parse_datetime, parse_duration, parse_time,
 )
-from django.utils.deprecation import RemovedInDjango20Warning
-from django.utils.encoding import force_text
-from django.utils.safestring import SafeBytes
 
-try:
-    import pytz
-except ImportError:
-    pytz = None
-
-try:
-    try:
-        from pysqlite2 import dbapi2 as Database
-    except ImportError:
-        from sqlite3 import dbapi2 as Database
-except ImportError as exc:
-    from django.core.exceptions import ImproperlyConfigured
-    raise ImproperlyConfigured("Error loading either pysqlite2 or sqlite3 modules (tried in that order): %s" % exc)
-
-# Some of these import sqlite3, so import them after checking if it's installed.
 from .client import DatabaseClient                          # isort:skip
 from .creation import DatabaseCreation                      # isort:skip
 from .features import DatabaseFeatures                      # isort:skip
@@ -46,48 +25,28 @@ from .introspection import DatabaseIntrospection            # isort:skip
 from .operations import DatabaseOperations                  # isort:skip
 from .schema import DatabaseSchemaEditor                    # isort:skip
 
-DatabaseError = Database.DatabaseError
-IntegrityError = Database.IntegrityError
-
-
-def adapt_datetime_warn_on_aware_datetime(value):
-    # Remove this function and rely on the default adapter in Django 2.0.
-    if settings.USE_TZ and timezone.is_aware(value):
-        warnings.warn(
-            "The SQLite database adapter received an aware datetime (%s), "
-            "probably from cursor.execute(). Update your code to pass a "
-            "naive datetime in the database connection's time zone (UTC by "
-            "default).", RemovedInDjango20Warning)
-        # This doesn't account for the database connection's timezone,
-        # which isn't known. (That's why this adapter is deprecated.)
-        value = value.astimezone(timezone.utc).replace(tzinfo=None)
-    return value.isoformat(str(" "))
-
 
 def decoder(conv_func):
-    """ The Python sqlite3 interface returns always byte strings.
-        This function converts the received value to a regular string before
-        passing it to the receiver function.
     """
-    return lambda s: conv_func(s.decode('utf-8'))
+    Convert bytestrings from Python's sqlite3 interface to a regular string.
+    """
+    return lambda s: conv_func(s.decode())
 
-Database.register_converter(str("bool"), decoder(lambda s: s == '1'))
-Database.register_converter(str("time"), decoder(parse_time))
-Database.register_converter(str("date"), decoder(parse_date))
-Database.register_converter(str("datetime"), decoder(parse_datetime))
-Database.register_converter(str("timestamp"), decoder(parse_datetime))
-Database.register_converter(str("TIMESTAMP"), decoder(parse_datetime))
-Database.register_converter(str("decimal"), decoder(backend_utils.typecast_decimal))
 
-Database.register_adapter(datetime.datetime, adapt_datetime_warn_on_aware_datetime)
+Database.register_converter("bool", lambda s: s == b'1')
+Database.register_converter("time", decoder(parse_time))
+Database.register_converter("date", decoder(parse_date))
+Database.register_converter("datetime", decoder(parse_datetime))
+Database.register_converter("timestamp", decoder(parse_datetime))
+Database.register_converter("TIMESTAMP", decoder(parse_datetime))
+Database.register_converter("decimal", decoder(decimal.Decimal))
+
 Database.register_adapter(decimal.Decimal, backend_utils.rev_typecast_decimal)
-if six.PY2:
-    Database.register_adapter(str, lambda s: s.decode('utf-8'))
-    Database.register_adapter(SafeBytes, lambda s: s.decode('utf-8'))
 
 
 class DatabaseWrapper(BaseDatabaseWrapper):
     vendor = 'sqlite'
+    display_name = 'SQLite'
     # SQLite doesn't actually support most of these types, but it "does the right
     # thing" given more verbose field definitions, so leave them as is so that
     # schema inspection is more useful.
@@ -97,7 +56,6 @@ class DatabaseWrapper(BaseDatabaseWrapper):
         'BinaryField': 'BLOB',
         'BooleanField': 'bool',
         'CharField': 'varchar(%(max_length)s)',
-        'CommaSeparatedIntegerField': 'varchar(%(max_length)s)',
         'DateField': 'date',
         'DateTimeField': 'datetime',
         'DecimalField': 'decimal',
@@ -163,21 +121,16 @@ class DatabaseWrapper(BaseDatabaseWrapper):
 
     Database = Database
     SchemaEditorClass = DatabaseSchemaEditor
-
-    def __init__(self, *args, **kwargs):
-        super(DatabaseWrapper, self).__init__(*args, **kwargs)
-
-        self.features = DatabaseFeatures(self)
-        self.ops = DatabaseOperations(self)
-        self.client = DatabaseClient(self)
-        self.creation = DatabaseCreation(self)
-        self.introspection = DatabaseIntrospection(self)
-        self.validation = BaseDatabaseValidation(self)
+    # Classes instantiated in __init__().
+    client_class = DatabaseClient
+    creation_class = DatabaseCreation
+    features_class = DatabaseFeatures
+    introspection_class = DatabaseIntrospection
+    ops_class = DatabaseOperations
 
     def get_connection_params(self):
         settings_dict = self.settings_dict
         if not settings_dict['NAME']:
-            from django.core.exceptions import ImproperlyConfigured
             raise ImproperlyConfigured(
                 "settings.DATABASES is improperly configured. "
                 "Please supply the NAME value.")
@@ -220,12 +173,13 @@ class DatabaseWrapper(BaseDatabaseWrapper):
         conn.create_function("regexp", 2, _sqlite_regexp)
         conn.create_function("django_format_dtdelta", 3, _sqlite_format_dtdelta)
         conn.create_function("django_power", 2, _sqlite_power)
+        conn.execute('PRAGMA foreign_keys = ON')
         return conn
 
     def init_connection_state(self):
         pass
 
-    def create_cursor(self):
+    def create_cursor(self, name=None):
         return self.connection.cursor(factory=SQLiteCursorWrapper)
 
     def close(self):
@@ -233,7 +187,7 @@ class DatabaseWrapper(BaseDatabaseWrapper):
         # If database is in memory, closing the connection destroys the
         # database. To prevent accidental data loss, ignore close requests on
         # an in-memory db.
-        if not self.is_in_memory_db(self.settings_dict['NAME']):
+        if not self.is_in_memory_db():
             BaseDatabaseWrapper.close(self)
 
     def _savepoint_allowed(self):
@@ -260,16 +214,26 @@ class DatabaseWrapper(BaseDatabaseWrapper):
         with self.wrap_database_errors:
             self.connection.isolation_level = level
 
+    def disable_constraint_checking(self):
+        if self.in_atomic_block:
+            # sqlite3 cannot disable constraint checking inside a transaction.
+            return False
+        self.cursor().execute('PRAGMA foreign_keys = OFF')
+        return True
+
+    def enable_constraint_checking(self):
+        self.cursor().execute('PRAGMA foreign_keys = ON')
+
     def check_constraints(self, table_names=None):
         """
-        Checks each table name in `table_names` for rows with invalid foreign
+        Check each table name in `table_names` for rows with invalid foreign
         key references. This method is intended to be used in conjunction with
         `disable_constraint_checking()` and `enable_constraint_checking()`, to
         determine if rows with invalid references were entered while constraint
         checks were off.
 
-        Raises an IntegrityError on the first invalid foreign key reference
-        encountered (if any) and provides detailed information about the
+        Raise an IntegrityError on the first invalid foreign key reference
+        encountered (if any) and provide detailed information about the
         invalid reference in the error message.
 
         Backends can override this method if they can more directly apply
@@ -319,8 +283,8 @@ class DatabaseWrapper(BaseDatabaseWrapper):
         """
         self.cursor().execute("BEGIN")
 
-    def is_in_memory_db(self, name):
-        return name == ":memory:" or "mode=memory" in force_text(name)
+    def is_in_memory_db(self):
+        return self.creation.is_in_memory_db(self.settings_dict['NAME'])
 
 
 FORMAT_QMARK_REGEX = re.compile(r'(?<!%)%s')
@@ -355,6 +319,10 @@ def _sqlite_date_extract(lookup_type, dt):
         return None
     if lookup_type == 'week_day':
         return (dt.isoweekday() % 7) + 1
+    elif lookup_type == 'week':
+        return dt.isocalendar()[1]
+    elif lookup_type == 'quarter':
+        return math.ceil(dt.month / 3)
     else:
         return getattr(dt, lookup_type)
 
@@ -366,6 +334,9 @@ def _sqlite_date_trunc(lookup_type, dt):
         return None
     if lookup_type == 'year':
         return "%i-01-01" % dt.year
+    elif lookup_type == 'quarter':
+        month_in_quarter = dt.month - (dt.month - 1) % 3
+        return '%i-%02i-01' % (dt.year, month_in_quarter)
     elif lookup_type == 'month':
         return "%i-%02i-01" % (dt.year, dt.month)
     elif lookup_type == 'day':
@@ -417,6 +388,10 @@ def _sqlite_datetime_extract(lookup_type, dt, tzname):
         return None
     if lookup_type == 'week_day':
         return (dt.isoweekday() % 7) + 1
+    elif lookup_type == 'week':
+        return dt.isocalendar()[1]
+    elif lookup_type == 'quarter':
+        return math.ceil(dt.month / 3)
     else:
         return getattr(dt, lookup_type)
 
@@ -427,6 +402,9 @@ def _sqlite_datetime_trunc(lookup_type, dt, tzname):
         return None
     if lookup_type == 'year':
         return "%i-01-01 00:00:00" % dt.year
+    elif lookup_type == 'quarter':
+        month_in_quarter = dt.month - (dt.month - 1) % 3
+        return '%i-%02i-01 00:00:00' % (dt.year, month_in_quarter)
     elif lookup_type == 'month':
         return "%i-%02i-01 00:00:00" % (dt.year, dt.month)
     elif lookup_type == 'day':
@@ -452,17 +430,17 @@ def _sqlite_time_extract(lookup_type, dt):
 def _sqlite_format_dtdelta(conn, lhs, rhs):
     """
     LHS and RHS can be either:
-        - An integer number of microseconds
-        - A string representing a timedelta object
-        - A string representing a datetime
+    - An integer number of microseconds
+    - A string representing a timedelta object
+    - A string representing a datetime
     """
     try:
-        if isinstance(lhs, six.integer_types):
+        if isinstance(lhs, int):
             lhs = str(decimal.Decimal(lhs) / decimal.Decimal(1000000))
         real_lhs = parse_duration(lhs)
         if real_lhs is None:
             real_lhs = backend_utils.typecast_timestamp(lhs)
-        if isinstance(rhs, six.integer_types):
+        if isinstance(rhs, int):
             rhs = str(decimal.Decimal(rhs) / decimal.Decimal(1000000))
         real_rhs = parse_duration(rhs)
         if real_rhs is None:
@@ -500,7 +478,7 @@ def _sqlite_timestamp_diff(lhs, rhs):
 
 
 def _sqlite_regexp(re_pattern, re_string):
-    return bool(re.search(re_pattern, force_text(re_string))) if re_string is not None else False
+    return bool(re.search(re_pattern, str(re_string))) if re_string is not None else False
 
 
 def _sqlite_power(x, y):

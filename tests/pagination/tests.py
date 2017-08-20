@@ -1,6 +1,5 @@
-from __future__ import unicode_literals
-
 import unittest
+import warnings
 from datetime import datetime
 
 from django.core.paginator import (
@@ -8,7 +7,6 @@ from django.core.paginator import (
     UnorderedObjectListWarning,
 )
 from django.test import TestCase
-from django.utils import six
 
 from .custom import ValidAdjacentNumsPaginator
 from .models import Article
@@ -113,8 +111,7 @@ class PaginationTests(unittest.TestCase):
 
     def test_invalid_page_number(self):
         """
-        Tests that invalid page numbers result in the correct exception being
-        raised.
+        Invalid page numbers result in the correct exception being raised.
         """
         paginator = Paginator([1, 2, 3], 2)
         with self.assertRaises(InvalidPage):
@@ -128,7 +125,7 @@ class PaginationTests(unittest.TestCase):
         self.assertEqual(paginator.validate_number(1), 1)
 
     def test_paginate_misc_classes(self):
-        class CountContainer(object):
+        class CountContainer:
             def count(self):
                 return 42
         # Paginator can be passed other objects with a count() method.
@@ -138,7 +135,7 @@ class PaginationTests(unittest.TestCase):
         self.assertEqual([1, 2, 3, 4, 5], list(paginator.page_range))
 
         # Paginator can be passed other objects that implement __len__.
-        class LenContainer(object):
+        class LenContainer:
             def __len__(self):
                 return 42
         paginator = Paginator(LenContainer(), 10)
@@ -165,7 +162,7 @@ class PaginationTests(unittest.TestCase):
 
     def test_page_indexes(self):
         """
-        Tests that paginator pages have the correct start and end indexes.
+        Paginator pages have the correct start and end indexes.
         """
         ten = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
         tests = (
@@ -215,7 +212,7 @@ class PaginationTests(unittest.TestCase):
 
     def test_page_sequence(self):
         """
-        Tests that a paginator page acts like a standard sequence.
+        A paginator page acts like a standard sequence.
         """
         eleven = 'abcdefghijk'
         page2 = Paginator(eleven, per_page=5, orphans=1).page(2)
@@ -227,7 +224,7 @@ class PaginationTests(unittest.TestCase):
 
     def test_get_page_hook(self):
         """
-        Tests that a Paginator subclass can use the ``_get_page`` hook to
+        A Paginator subclass can use the ``_get_page`` hook to
         return an alternative to the standard Page class.
         """
         eleven = 'abcdefghijk'
@@ -243,7 +240,7 @@ class PaginationTests(unittest.TestCase):
         """
         Paginator.page_range should be an iterator.
         """
-        self.assertIsInstance(Paginator([1, 2, 3], 2).page_range, type(six.moves.range(0)))
+        self.assertIsInstance(Paginator([1, 2, 3], 2).page_range, type(range(0)))
 
 
 class ModelPaginationTests(TestCase):
@@ -259,7 +256,7 @@ class ModelPaginationTests(TestCase):
     def test_first_page(self):
         paginator = Paginator(Article.objects.order_by('id'), 5)
         p = paginator.page(1)
-        self.assertEqual("<Page 1 of 2>", six.text_type(p))
+        self.assertEqual("<Page 1 of 2>", str(p))
         self.assertQuerysetEqual(p.object_list, [
             "<Article: Article 1>",
             "<Article: Article 2>",
@@ -279,7 +276,7 @@ class ModelPaginationTests(TestCase):
     def test_last_page(self):
         paginator = Paginator(Article.objects.order_by('id'), 5)
         p = paginator.page(2)
-        self.assertEqual("<Page 2 of 2>", six.text_type(p))
+        self.assertEqual("<Page 2 of 2>", str(p))
         self.assertQuerysetEqual(p.object_list, [
             "<Article: Article 6>",
             "<Article: Article 7>",
@@ -322,12 +319,34 @@ class ModelPaginationTests(TestCase):
         self.assertIsInstance(p.object_list, list)
 
     def test_paginating_unordered_queryset_raises_warning(self):
-        msg = (
-            "Pagination may yield inconsistent results with an unordered "
-            "object_list: <QuerySet [<Article: Article 1>, "
-            "<Article: Article 2>, <Article: Article 3>, <Article: Article 4>, "
-            "<Article: Article 5>, <Article: Article 6>, <Article: Article 7>, "
-            "<Article: Article 8>, <Article: Article 9>]>"
-        )
-        with self.assertRaisesMessage(UnorderedObjectListWarning, msg):
+        with warnings.catch_warnings(record=True) as warns:
+            # Prevent the RuntimeWarning subclass from appearing as an
+            # exception due to the warnings.simplefilter() in runtests.py.
+            warnings.filterwarnings('always', category=UnorderedObjectListWarning)
             Paginator(Article.objects.all(), 5)
+        self.assertEqual(len(warns), 1)
+        warning = warns[0]
+        self.assertEqual(str(warning.message), (
+            "Pagination may yield inconsistent results with an unordered "
+            "object_list: <class 'pagination.models.Article'> QuerySet."
+        ))
+        # The warning points at the Paginator caller (i.e. the stacklevel
+        # is appropriate).
+        self.assertEqual(warning.filename, __file__)
+
+    def test_paginating_unordered_object_list_raises_warning(self):
+        """
+        Unordered object list warning with an object that has an orderd
+        attribute but not a model attribute.
+        """
+        class ObjectList:
+            ordered = False
+        object_list = ObjectList()
+        with warnings.catch_warnings(record=True) as warns:
+            warnings.filterwarnings('always', category=UnorderedObjectListWarning)
+            Paginator(object_list, 5)
+        self.assertEqual(len(warns), 1)
+        self.assertEqual(str(warns[0].message), (
+            "Pagination may yield inconsistent results with an unordered "
+            "object_list: {!r}.".format(object_list)
+        ))

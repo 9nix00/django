@@ -1,8 +1,6 @@
 """
 Regression tests for Model inheritance behavior.
 """
-from __future__ import unicode_literals
-
 import datetime
 from operator import attrgetter
 from unittest import expectedFailure
@@ -22,10 +20,10 @@ from .models import (
 class ModelInheritanceTest(TestCase):
     def test_model_inheritance(self):
         # Regression for #7350, #7202
-        # Check that when you create a Parent object with a specific reference
-        # to an existent child instance, saving the Parent doesn't duplicate
-        # the child. This behavior is only activated during a raw save - it
-        # is mostly relevant to deserialization, but any sort of CORBA style
+        # When you create a Parent object with a specific reference to an
+        # existent child instance, saving the Parent doesn't duplicate the
+        # child. This behavior is only activated during a raw save - it is
+        # mostly relevant to deserialization, but any sort of CORBA style
         # 'narrow()' API would require a similar approach.
 
         # Create a child-parent-grandparent chain
@@ -49,7 +47,7 @@ class ModelInheritanceTest(TestCase):
         park = ParkingLot(parent=place2, capacity=100)
         park.save_base(raw=True)
 
-        # Check that no extra parent objects have been created.
+        # No extra parent objects have been created.
         places = list(Place.objects.all())
         self.assertEqual(places, [place1, place2])
 
@@ -325,8 +323,8 @@ class ModelInheritanceTest(TestCase):
             assignee="adrian")
 
     def test_abstract_base_class_m2m_relation_inheritance(self):
-        # Check that many-to-many relations defined on an abstract base class
-        # are correctly inherited (and created) on the child class.
+        # many-to-many relations defined on an abstract base class are
+        # correctly inherited (and created) on the child class.
         p1 = Person.objects.create(name='Alice')
         p2 = Person.objects.create(name='Bob')
         p3 = Person.objects.create(name='Carol')
@@ -348,8 +346,8 @@ class ModelInheritanceTest(TestCase):
         parties = list(p2.bachelorparty_set.all())
         self.assertEqual(parties, [bachelor])
 
-        # Check that a subclass of a subclass of an abstract model doesn't get
-        # its own accessor.
+        # A subclass of a subclass of an abstract model doesn't get its own
+        # accessor.
         self.assertFalse(hasattr(p2, 'messybachelorparty_set'))
 
         # ... but it does inherit the m2m from its parent
@@ -410,8 +408,8 @@ class ModelInheritanceTest(TestCase):
 
     def test_inherited_unique_field_with_form(self):
         """
-        Test that a model which has different primary key for the parent model
-        passes unique field checking correctly. Refs #17615.
+        A model which has different primary key for the parent model passes
+        unique field checking correctly (#17615).
         """
         class ProfileForm(forms.ModelForm):
             class Meta:
@@ -420,8 +418,7 @@ class ModelInheritanceTest(TestCase):
 
         User.objects.create(username="user_only")
         p = Profile.objects.create(username="user_with_profile")
-        form = ProfileForm({'username': "user_with_profile", 'extra': "hello"},
-                           instance=p)
+        form = ProfileForm({'username': "user_with_profile", 'extra': "hello"}, instance=p)
         self.assertTrue(form.is_valid())
 
     def test_inheritance_joins(self):
@@ -441,10 +438,7 @@ class ModelInheritanceTest(TestCase):
         self.assertEqual(str(qs.query).count('JOIN'), 1)
 
     def test_issue_21554(self):
-        senator = Senator.objects.create(
-            name='John Doe', title='X', state='Y'
-        )
-
+        senator = Senator.objects.create(name='John Doe', title='X', state='Y')
         senator = Senator.objects.get(pk=senator.pk)
         self.assertEqual(senator.name, 'John Doe')
         self.assertEqual(senator.title, 'X')
@@ -478,6 +472,17 @@ class ModelInheritanceTest(TestCase):
         jane = Supplier.objects.order_by("name").select_related("restaurant")[0]
         self.assertEqual(jane.restaurant.name, "Craft")
 
+    def test_filter_with_parent_fk(self):
+        r = Restaurant.objects.create()
+        s = Supplier.objects.create(restaurant=r)
+        # The mismatch between Restaurant and Place is intentional (#28175).
+        self.assertSequenceEqual(Supplier.objects.filter(restaurant__in=Place.objects.all()), [s])
+
+    def test_ptr_accessor_assigns_state(self):
+        r = Restaurant.objects.create()
+        self.assertIs(r.place_ptr._state.adding, False)
+        self.assertEqual(r.place_ptr._state.db, 'default')
+
     def test_related_filtering_query_efficiency_ticket_15844(self):
         r = Restaurant.objects.create(
             name="Guido's House of Pasta",
@@ -487,15 +492,9 @@ class ModelInheritanceTest(TestCase):
         )
         s = Supplier.objects.create(restaurant=r)
         with self.assertNumQueries(1):
-            self.assertQuerysetEqual(
-                Supplier.objects.filter(restaurant=r),
-                [s], lambda x: x,
-            )
+            self.assertSequenceEqual(Supplier.objects.filter(restaurant=r), [s])
         with self.assertNumQueries(1):
-            self.assertQuerysetEqual(
-                r.supplier_set.all(),
-                [s], lambda x: x,
-            )
+            self.assertSequenceEqual(r.supplier_set.all(), [s])
 
     def test_queries_on_parent_access(self):
         italian_restaurant = ItalianRestaurant.objects.create(
@@ -528,3 +527,40 @@ class ModelInheritanceTest(TestCase):
             restaurant = italian_restaurant.restaurant_ptr
             self.assertEqual(restaurant.place_ptr.restaurant, restaurant)
             self.assertEqual(restaurant.italianrestaurant, italian_restaurant)
+
+    def test_id_field_update_on_ancestor_change(self):
+        place1 = Place.objects.create(name='House of Pasta', address='944 Fullerton')
+        place2 = Place.objects.create(name='House of Pizza', address='954 Fullerton')
+        place3 = Place.objects.create(name='Burger house', address='964 Fullerton')
+        restaurant1 = Restaurant.objects.create(
+            place_ptr=place1,
+            serves_hot_dogs=True,
+            serves_pizza=False,
+        )
+        restaurant2 = Restaurant.objects.create(
+            place_ptr=place2,
+            serves_hot_dogs=True,
+            serves_pizza=False,
+        )
+
+        italian_restaurant = ItalianRestaurant.objects.create(
+            restaurant_ptr=restaurant1,
+            serves_gnocchi=True,
+        )
+        # Changing the parent of a restaurant changes the restaurant's ID & PK.
+        restaurant1.place_ptr = place3
+        self.assertEqual(restaurant1.pk, place3.pk)
+        self.assertEqual(restaurant1.id, place3.id)
+        self.assertEqual(restaurant1.pk, restaurant1.id)
+        restaurant1.place_ptr = None
+        self.assertIsNone(restaurant1.pk)
+        self.assertIsNone(restaurant1.id)
+        # Changing the parent of an italian restaurant changes the restaurant's
+        # ID & PK.
+        italian_restaurant.restaurant_ptr = restaurant2
+        self.assertEqual(italian_restaurant.pk, restaurant2.pk)
+        self.assertEqual(italian_restaurant.id, restaurant2.id)
+        self.assertEqual(italian_restaurant.pk, italian_restaurant.id)
+        italian_restaurant.restaurant_ptr = None
+        self.assertIsNone(italian_restaurant.pk)
+        self.assertIsNone(italian_restaurant.id)

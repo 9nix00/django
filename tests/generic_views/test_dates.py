@@ -1,6 +1,3 @@
-# -*- coding: utf-8 -*-
-from __future__ import unicode_literals
-
 import datetime
 
 from django.core.exceptions import ImproperlyConfigured
@@ -20,7 +17,7 @@ def _make_books(n, base_date):
             pubdate=base_date - datetime.timedelta(days=i))
 
 
-class TestDataMixin(object):
+class TestDataMixin:
 
     @classmethod
     def setUpTestData(cls):
@@ -82,7 +79,11 @@ class ArchiveIndexViewTests(TestDataMixin, TestCase):
         self.assertTemplateUsed(res, 'generic_views/book_detail.html')
 
     def test_archive_view_invalid(self):
-        with self.assertRaises(ImproperlyConfigured):
+        msg = (
+            'BookArchive is missing a QuerySet. Define BookArchive.model, '
+            'BookArchive.queryset, or override BookArchive.get_queryset().'
+        )
+        with self.assertRaisesMessage(ImproperlyConfigured, msg):
             self.client.get('/dates/books/invalid/')
 
     def test_archive_view_by_month(self):
@@ -664,15 +665,26 @@ class DateDetailViewTests(TestDataMixin, TestCase):
         self.assertEqual(res.context['book'], b)
         self.assertTemplateUsed(res, 'generic_views/book_detail.html')
 
+    def test_year_out_of_range(self):
+        urls = [
+            '/dates/books/9999/',
+            '/dates/books/9999/12/',
+            '/dates/books/9999/week/52/',
+        ]
+        for url in urls:
+            with self.subTest(url=url):
+                res = self.client.get(url)
+                self.assertEqual(res.status_code, 404)
+                self.assertEqual(res.context['exception'], 'Date out of range')
+
     def test_invalid_url(self):
         with self.assertRaises(AttributeError):
             self.client.get("/dates/books/2008/oct/01/nopk/")
 
     def test_get_object_custom_queryset(self):
         """
-        Ensure that custom querysets are used when provided to
-        BaseDateDetailView.get_object()
-        Refs #16918.
+        Custom querysets are used when provided to
+        BaseDateDetailView.get_object().
         """
         res = self.client.get(
             '/dates/books/get_object_custom_queryset/2006/may/01/%s/' % self.book2.pk)

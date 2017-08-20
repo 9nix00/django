@@ -1,5 +1,3 @@
-from __future__ import unicode_literals
-
 from django import forms
 from django.contrib import admin
 from django.contrib.admin import AdminSite
@@ -7,7 +5,9 @@ from django.contrib.contenttypes.admin import GenericStackedInline
 from django.core import checks
 from django.test import SimpleTestCase, override_settings
 
-from .models import Album, Book, City, Influence, Song, State, TwoAlbumFKAndAnE
+from .models import (
+    Album, Author, Book, City, Influence, Song, State, TwoAlbumFKAndAnE,
+)
 
 
 class SongForm(forms.ModelForm):
@@ -43,7 +43,6 @@ class MyAdmin(admin.ModelAdmin):
 )
 class SystemChecksTestCase(SimpleTestCase):
 
-    @override_settings(DEBUG=True)
     def test_checks_are_performed(self):
         admin.site.register(Song, MyAdmin)
         try:
@@ -52,7 +51,6 @@ class SystemChecksTestCase(SimpleTestCase):
             self.assertEqual(errors, expected)
         finally:
             admin.site.unregister(Song)
-            admin.sites.system_check_errors = []
 
     @override_settings(INSTALLED_APPS=['django.contrib.admin'])
     def test_contenttypes_dependency(self):
@@ -65,6 +63,10 @@ class SystemChecksTestCase(SimpleTestCase):
             )
         ]
         self.assertEqual(errors, expected)
+
+    @override_settings(TEMPLATES=[])
+    def test_no_template_engines(self):
+        self.assertEqual(admin.checks.check_dependencies(), [])
 
     @override_settings(
         INSTALLED_APPS=[
@@ -92,7 +94,6 @@ class SystemChecksTestCase(SimpleTestCase):
         ]
         self.assertEqual(errors, expected)
 
-    @override_settings(DEBUG=True)
     def test_custom_adminsite(self):
         class CustomAdminSite(admin.AdminSite):
             pass
@@ -105,7 +106,26 @@ class SystemChecksTestCase(SimpleTestCase):
             self.assertEqual(errors, expected)
         finally:
             custom_site.unregister(Song)
-            admin.sites.system_check_errors = []
+
+    def test_allows_checks_relying_on_other_modeladmins(self):
+        class MyBookAdmin(admin.ModelAdmin):
+            def check(self, **kwargs):
+                errors = super().check(**kwargs)
+                author_admin = self.admin_site._registry.get(Author)
+                if author_admin is None:
+                    errors.append('AuthorAdmin missing!')
+                return errors
+
+        class MyAuthorAdmin(admin.ModelAdmin):
+            pass
+
+        admin.site.register(Book, MyBookAdmin)
+        admin.site.register(Author, MyAuthorAdmin)
+        try:
+            self.assertEqual(admin.site.check(None), [])
+        finally:
+            admin.site.unregister(Book)
+            admin.site.unregister(Author)
 
     def test_field_name_not_in_list_display(self):
         class SongAdmin(admin.ModelAdmin):
@@ -121,6 +141,31 @@ class SystemChecksTestCase(SimpleTestCase):
             )
         ]
         self.assertEqual(errors, expected)
+
+    def test_list_editable_not_a_list_or_tuple(self):
+        class SongAdmin(admin.ModelAdmin):
+            list_editable = 'test'
+
+        self.assertEqual(SongAdmin(Song, AdminSite()).check(), [
+            checks.Error(
+                "The value of 'list_editable' must be a list or tuple.",
+                obj=SongAdmin,
+                id='admin.E120',
+            )
+        ])
+
+    def test_list_editable_missing_field(self):
+        class SongAdmin(admin.ModelAdmin):
+            list_editable = ('test',)
+
+        self.assertEqual(SongAdmin(Song, AdminSite()).check(), [
+            checks.Error(
+                "The value of 'list_editable[0]' refers to 'test', which is "
+                "not an attribute of 'admin_checks.Song'.",
+                obj=SongAdmin,
+                id='admin.E121',
+            )
+        ])
 
     def test_readonly_and_editable(self):
         class SongAdmin(admin.ModelAdmin):
@@ -165,16 +210,15 @@ class SystemChecksTestCase(SimpleTestCase):
 
     def test_custom_get_form_with_fieldsets(self):
         """
-        Ensure that the fieldsets checks are skipped when the ModelAdmin.get_form() method
+        The fieldsets checks are skipped when the ModelAdmin.get_form() method
         is overridden.
-        Refs #19445.
         """
         errors = ValidFormFieldsets(Song, AdminSite()).check()
         self.assertEqual(errors, [])
 
     def test_fieldsets_fields_non_tuple(self):
         """
-        Tests for a tuple/list for the first fieldset's fields.
+        The first fieldset's fields must be a list/tuple.
         """
         class NotATupleAdmin(admin.ModelAdmin):
             list_display = ["pk", "title"]
@@ -197,7 +241,7 @@ class SystemChecksTestCase(SimpleTestCase):
 
     def test_nonfirst_fieldset(self):
         """
-        Tests for a tuple/list for the second fieldset's fields.
+        The second fieldset's fields must be a list/tuple.
         """
         class NotATupleAdmin(admin.ModelAdmin):
             fieldsets = [
@@ -309,7 +353,7 @@ class SystemChecksTestCase(SimpleTestCase):
 
     def test_generic_inline_model_admin_non_generic_model(self):
         """
-        Ensure that a model without a GenericForeignKey raises problems if it's included
+        A model without a GenericForeignKey raises problems if it's included
         in an GenericInlineModelAdmin definition.
         """
         class BookInline(GenericStackedInline):
@@ -329,7 +373,10 @@ class SystemChecksTestCase(SimpleTestCase):
         self.assertEqual(errors, expected)
 
     def test_generic_inline_model_admin_bad_ct_field(self):
-        "A GenericInlineModelAdmin raises problems if the ct_field points to a non-existent field."
+        """
+        A GenericInlineModelAdmin errors if the ct_field points to a
+        nonexistent field.
+        """
         class InfluenceInline(GenericStackedInline):
             model = Influence
             ct_field = 'nonexistent'
@@ -348,7 +395,10 @@ class SystemChecksTestCase(SimpleTestCase):
         self.assertEqual(errors, expected)
 
     def test_generic_inline_model_admin_bad_fk_field(self):
-        "A GenericInlineModelAdmin raises problems if the ct_fk_field points to a non-existent field."
+        """
+        A GenericInlineModelAdmin errors if the ct_fk_field points to a
+        nonexistent field.
+        """
         class InfluenceInline(GenericStackedInline):
             model = Influence
             ct_fk_field = 'nonexistent'
@@ -413,18 +463,15 @@ class SystemChecksTestCase(SimpleTestCase):
         self.assertEqual(errors, expected)
 
     def test_app_label_in_admin_checks(self):
-        """
-        Regression test for #15669 - Include app label in admin system check messages
-        """
-        class RawIdNonexistingAdmin(admin.ModelAdmin):
-            raw_id_fields = ('nonexisting',)
+        class RawIdNonexistentAdmin(admin.ModelAdmin):
+            raw_id_fields = ('nonexistent',)
 
-        errors = RawIdNonexistingAdmin(Album, AdminSite()).check()
+        errors = RawIdNonexistentAdmin(Album, AdminSite()).check()
         expected = [
             checks.Error(
-                "The value of 'raw_id_fields[0]' refers to 'nonexisting', "
+                "The value of 'raw_id_fields[0]' refers to 'nonexistent', "
                 "which is not an attribute of 'admin_checks.Album'.",
-                obj=RawIdNonexistingAdmin,
+                obj=RawIdNonexistentAdmin,
                 id='admin.E002',
             )
         ]
@@ -554,6 +601,18 @@ class SystemChecksTestCase(SimpleTestCase):
         ]
         self.assertEqual(errors, expected)
 
+    def test_readonly_fields_not_list_or_tuple(self):
+        class SongAdmin(admin.ModelAdmin):
+            readonly_fields = 'test'
+
+        self.assertEqual(SongAdmin(Song, AdminSite()).check(), [
+            checks.Error(
+                "The value of 'readonly_fields' must be a list or tuple.",
+                obj=SongAdmin,
+                id='admin.E034',
+            )
+        ])
+
     def test_extra(self):
         class SongAdmin(admin.ModelAdmin):
             def awesome_song(self, instance):
@@ -583,7 +642,7 @@ class SystemChecksTestCase(SimpleTestCase):
         errors = BookAdmin(Book, AdminSite()).check()
         expected = [
             checks.Error(
-                "The value of 'fields' cannot include the many-to-many field 'authors' "
+                "The value of 'fields' cannot include the ManyToManyField 'authors', "
                 "because that field manually specifies a relationship model.",
                 obj=BookAdmin,
                 id='admin.E013',
@@ -601,8 +660,8 @@ class SystemChecksTestCase(SimpleTestCase):
         errors = FieldsetBookAdmin(Book, AdminSite()).check()
         expected = [
             checks.Error(
-                "The value of 'fieldsets[1][1][\"fields\"]' cannot include the many-to-many field "
-                "'authors' because that field manually specifies a relationship model.",
+                "The value of 'fieldsets[1][1][\"fields\"]' cannot include the ManyToManyField "
+                "'authors', because that field manually specifies a relationship model.",
                 obj=FieldsetBookAdmin,
                 id='admin.E013',
             )

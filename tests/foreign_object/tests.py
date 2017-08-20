@@ -13,7 +13,6 @@ from .models import (
     Group, Membership, NewsArticle, Person,
 )
 
-
 # Note that these tests are testing internal implementation details.
 # ForeignObject is not part of public API.
 
@@ -153,16 +152,22 @@ class MultiColumnFKTests(TestCase):
                                        group_id=self.cia.id)
         Friendship.objects.create(from_friend_country_id=self.usa.id, from_friend_id=self.bob.id,
                                   to_friend_country_id=self.usa.id, to_friend_id=self.jim.id)
-        self.assertQuerysetEqual(Membership.objects.filter(
-            person__in=Person.objects.filter(
-                from_friend__in=Friendship.objects.filter(
-                    to_friend__in=Person.objects.all()))),
-            [m1], lambda x: x)
-        self.assertQuerysetEqual(Membership.objects.exclude(
-            person__in=Person.objects.filter(
-                from_friend__in=Friendship.objects.filter(
-                    to_friend__in=Person.objects.all()))),
-            [m2], lambda x: x)
+        self.assertSequenceEqual(
+            Membership.objects.filter(
+                person__in=Person.objects.filter(
+                    from_friend__in=Friendship.objects.filter(to_friend__in=Person.objects.all())
+                )
+            ),
+            [m1]
+        )
+        self.assertSequenceEqual(
+            Membership.objects.exclude(
+                person__in=Person.objects.filter(
+                    from_friend__in=Friendship.objects.filter(to_friend__in=Person.objects.all())
+                )
+            ),
+            [m2]
+        )
 
     def test_select_related_foreignkey_forward_works(self):
         Membership.objects.create(membership_country=self.usa, person=self.bob, group=self.cia)
@@ -363,7 +368,12 @@ class MultiColumnFKTests(TestCase):
         ArticleTag.objects.create(article=a1, name="foo")
         self.assertEqual(Article.objects.filter(tag__name="foo").count(), 1)
         self.assertEqual(Article.objects.filter(tag__name="bar").count(), 0)
-        with self.assertRaises(FieldError):
+        msg = (
+            "Cannot resolve keyword 'tags' into field. Choices are: "
+            "active_translation, active_translation_q, articletranslation, "
+            "id, idea_things, newsarticle, pub_date, tag"
+        )
+        with self.assertRaisesMessage(FieldError, msg):
             Article.objects.filter(tags__name="foo")
 
     def test_many_to_many_related_query_name(self):
@@ -372,7 +382,12 @@ class MultiColumnFKTests(TestCase):
         a1.ideas.add(i1)
         self.assertEqual(Article.objects.filter(idea_things__name="idea1").count(), 1)
         self.assertEqual(Article.objects.filter(idea_things__name="idea2").count(), 0)
-        with self.assertRaises(FieldError):
+        msg = (
+            "Cannot resolve keyword 'ideas' into field. Choices are: "
+            "active_translation, active_translation_q, articletranslation, "
+            "id, idea_things, newsarticle, pub_date, tag"
+        )
+        with self.assertRaisesMessage(FieldError, msg):
             Article.objects.filter(ideas__name="idea1")
 
     @translation.override('fi')
@@ -380,9 +395,9 @@ class MultiColumnFKTests(TestCase):
         na = NewsArticle.objects.create(pub_date=datetime.date.today())
         ArticleTranslation.objects.create(
             article=na, lang="fi", title="foo", body="bar")
-        self.assertQuerysetEqual(
+        self.assertSequenceEqual(
             NewsArticle.objects.select_related('active_translation'),
-            [na], lambda x: x
+            [na]
         )
         with self.assertNumQueries(1):
             self.assertEqual(
@@ -392,7 +407,6 @@ class MultiColumnFKTests(TestCase):
 
     @skipUnlessDBFeature('has_bulk_insert')
     def test_batch_create_foreign_object(self):
-        """ See: https://code.djangoproject.com/ticket/21566 """
         objs = [Person(name="abcd_%s" % i, person_country=self.usa) for i in range(0, 5)]
         Person.objects.bulk_create(objs, 10)
 

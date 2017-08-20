@@ -55,11 +55,11 @@ def _create_cache(backend, **kwargs):
     return backend_cls(location, params)
 
 
-class CacheHandler(object):
+class CacheHandler:
     """
     A Cache Handler to manage access to Cache instances.
 
-    Ensures only one instance of each alias exists per thread.
+    Ensure only one instance of each alias exists per thread.
     """
     def __init__(self):
         self._caches = local()
@@ -84,10 +84,11 @@ class CacheHandler(object):
     def all(self):
         return getattr(self._caches, 'caches', {}).values()
 
+
 caches = CacheHandler()
 
 
-class DefaultCacheProxy(object):
+class DefaultCacheProxy:
     """
     Proxy access to the default Cache object's attributes.
 
@@ -109,8 +110,6 @@ class DefaultCacheProxy(object):
     def __eq__(self, other):
         return caches[DEFAULT_CACHE_ALIAS] == other
 
-    def __ne__(self, other):
-        return caches[DEFAULT_CACHE_ALIAS] != other
 
 cache = DefaultCacheProxy()
 
@@ -121,4 +120,6 @@ def close_caches(**kwargs):
     # cache.close is a no-op
     for cache in caches.all():
         cache.close()
+
+
 signals.request_finished.connect(close_caches)

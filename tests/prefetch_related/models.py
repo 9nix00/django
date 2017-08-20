@@ -5,12 +5,10 @@ from django.contrib.contenttypes.fields import (
 )
 from django.contrib.contenttypes.models import ContentType
 from django.db import models
-from django.utils.encoding import python_2_unicode_compatible
+from django.db.models.query import ModelIterable, QuerySet
+from django.utils.functional import cached_property
 
 
-# Basic tests
-
-@python_2_unicode_compatible
 class Author(models.Model):
     name = models.CharField(max_length=50, unique=True)
     first_book = models.ForeignKey('Book', models.CASCADE, related_name='first_time_authors')
@@ -37,7 +35,6 @@ class FavoriteAuthors(models.Model):
         ordering = ['id']
 
 
-@python_2_unicode_compatible
 class AuthorAddress(models.Model):
     author = models.ForeignKey(Author, models.CASCADE, to_field='name', related_name='addresses')
     address = models.TextField()
@@ -49,7 +46,6 @@ class AuthorAddress(models.Model):
         return self.address
 
 
-@python_2_unicode_compatible
 class Book(models.Model):
     title = models.CharField(max_length=255)
     authors = models.ManyToManyField(Author, related_name='books')
@@ -73,7 +69,6 @@ class Bio(models.Model):
     books = models.ManyToManyField(Book, blank=True)
 
 
-@python_2_unicode_compatible
 class Reader(models.Model):
     name = models.CharField(max_length=50)
     books_read = models.ManyToManyField(Book, related_name='read_by')
@@ -99,17 +94,27 @@ class Qualification(models.Model):
         ordering = ['id']
 
 
+class ModelIterableSubclass(ModelIterable):
+    pass
+
+
+class TeacherQuerySet(QuerySet):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._iterable_class = ModelIterableSubclass
+
+
 class TeacherManager(models.Manager):
     def get_queryset(self):
-        return super(TeacherManager, self).get_queryset().prefetch_related('qualifications')
+        return super().get_queryset().prefetch_related('qualifications')
 
 
-@python_2_unicode_compatible
 class Teacher(models.Model):
     name = models.CharField(max_length=50)
     qualifications = models.ManyToManyField(Qualification)
 
     objects = TeacherManager()
+    objects_custom = TeacherQuerySet.as_manager()
 
     def __str__(self):
         return "%s (%s)" % (self.name, ", ".join(q.name for q in self.qualifications.all()))
@@ -128,7 +133,6 @@ class Department(models.Model):
 
 # GenericRelation/GenericForeignKey tests
 
-@python_2_unicode_compatible
 class TaggedItem(models.Model):
     tag = models.SlugField()
     content_type = models.ForeignKey(
@@ -219,13 +223,16 @@ class Person(models.Model):
     def all_houses(self):
         return list(self.houses.all())
 
+    @cached_property
+    def cached_all_houses(self):
+        return self.all_houses
+
     class Meta:
         ordering = ['id']
 
 
 # Models for nullable FK tests
 
-@python_2_unicode_compatible
 class Employee(models.Model):
     name = models.CharField(max_length=50)
     boss = models.ForeignKey('self', models.SET_NULL, null=True, related_name='serfs')
@@ -239,7 +246,6 @@ class Employee(models.Model):
 
 # Ticket #19607
 
-@python_2_unicode_compatible
 class LessonEntry(models.Model):
     name1 = models.CharField(max_length=200)
     name2 = models.CharField(max_length=200)
@@ -248,7 +254,6 @@ class LessonEntry(models.Model):
         return "%s %s" % (self.name1, self.name2)
 
 
-@python_2_unicode_compatible
 class WordEntry(models.Model):
     lesson_entry = models.ForeignKey(LessonEntry, models.CASCADE)
     name = models.CharField(max_length=200)
@@ -259,7 +264,6 @@ class WordEntry(models.Model):
 
 # Ticket #21410: Regression when related_name="+"
 
-@python_2_unicode_compatible
 class Author2(models.Model):
     name = models.CharField(max_length=50, unique=True)
     first_book = models.ForeignKey('Book', models.CASCADE, related_name='first_time_authors+')

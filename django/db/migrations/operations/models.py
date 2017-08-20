@@ -1,10 +1,8 @@
-from __future__ import unicode_literals
-
 from django.db import models
 from django.db.migrations.operations.base import Operation
 from django.db.migrations.state import ModelState
+from django.db.models.fields.related import RECURSIVE_RELATIONSHIP_CONSTANT
 from django.db.models.options import normalize_together
-from django.utils import six
 from django.utils.functional import cached_property
 
 from .fields import (
@@ -35,15 +33,13 @@ class ModelOperation(Operation):
 
     def reduce(self, operation, in_between, app_label=None):
         return (
-            super(ModelOperation, self).reduce(operation, in_between, app_label=app_label) or
+            super().reduce(operation, in_between, app_label=app_label) or
             not operation.references_model(self.name, app_label)
         )
 
 
 class CreateModel(ModelOperation):
-    """
-    Create a model's table.
-    """
+    """Create a model's table."""
 
     serialization_expand_args = ['fields', 'options', 'managers']
 
@@ -52,13 +48,13 @@ class CreateModel(ModelOperation):
         self.options = options or {}
         self.bases = bases or (models.Model,)
         self.managers = managers or []
-        super(CreateModel, self).__init__(name)
+        super().__init__(name)
         # Sanity-check that there are no duplicated field names, bases, or
         # manager names
         _check_for_duplicates('fields', (name for name, _ in self.fields))
         _check_for_duplicates('bases', (
             base._meta.label_lower if hasattr(base, '_meta') else
-            base.lower() if isinstance(base, six.string_types) else base
+            base.lower() if isinstance(base, str) else base
             for base in self.bases
         ))
         _check_for_duplicates('managers', (name for name, _ in self.managers))
@@ -75,7 +71,7 @@ class CreateModel(ModelOperation):
         if self.managers and self.managers != [('objects', models.Manager())]:
             kwargs['managers'] = self.managers
         return (
-            self.__class__.__name__,
+            self.__class__.__qualname__,
             [],
             kwargs
         )
@@ -109,7 +105,10 @@ class CreateModel(ModelOperation):
             return True
 
         # Check we didn't inherit from the model
-        models_to_check = [base for base in self.bases if base is not models.Model]
+        models_to_check = [
+            base for base in self.bases
+            if base is not models.Model and isinstance(base, (models.base.ModelBase, str))
+        ]
         # Check we have no FKs/M2Ms with it
         for fname, field in self.fields:
             if field.remote_field:
@@ -127,7 +126,7 @@ class CreateModel(ModelOperation):
         Take either a model class or an "app_label.ModelName" string
         and return (app_label, object_name).
         """
-        if isinstance(model, six.string_types):
+        if isinstance(model, str):
             return model.split(".", 1)
         else:
             return model._meta.app_label, model._meta.object_name
@@ -143,6 +142,18 @@ class CreateModel(ModelOperation):
                     operation.new_name,
                     fields=self.fields,
                     options=self.options,
+                    bases=self.bases,
+                    managers=self.managers,
+                ),
+            ]
+        elif isinstance(operation, AlterModelOptions) and self.name_lower == operation.name_lower:
+            new_options = self.options.copy()
+            new_options.update(operation.options)
+            return [
+                CreateModel(
+                    self.name,
+                    fields=self.fields,
+                    options=new_options,
                     bases=self.bases,
                     managers=self.managers,
                 ),
@@ -210,20 +221,18 @@ class CreateModel(ModelOperation):
                         managers=self.managers,
                     ),
                 ]
-        return super(CreateModel, self).reduce(operation, in_between, app_label=app_label)
+        return super().reduce(operation, in_between, app_label=app_label)
 
 
 class DeleteModel(ModelOperation):
-    """
-    Drops a model's table.
-    """
+    """Drop a model's table."""
 
     def deconstruct(self):
         kwargs = {
             'name': self.name,
         }
         return (
-            self.__class__.__name__,
+            self.__class__.__qualname__,
             [],
             kwargs
         )
@@ -246,14 +255,12 @@ class DeleteModel(ModelOperation):
 
 
 class RenameModel(ModelOperation):
-    """
-    Renames a model.
-    """
+    """Rename a model."""
 
     def __init__(self, old_name, new_name):
         self.old_name = old_name
         self.new_name = new_name
-        super(RenameModel, self).__init__(old_name)
+        super().__init__(old_name)
 
     @cached_property
     def old_name_lower(self):
@@ -269,69 +276,59 @@ class RenameModel(ModelOperation):
             'new_name': self.new_name,
         }
         return (
-            self.__class__.__name__,
+            self.__class__.__qualname__,
             [],
             kwargs
         )
 
+    def _get_model_tuple(self, remote_model, app_label, model_name):
+        if remote_model == RECURSIVE_RELATIONSHIP_CONSTANT:
+            return app_label, model_name.lower()
+        elif '.' in remote_model:
+            return tuple(remote_model.lower().split('.'))
+        else:
+            return app_label, remote_model.lower()
+
     def state_forwards(self, app_label, state):
-        apps = state.apps
-        model = apps.get_model(app_label, self.old_name)
-        model._meta.apps = apps
-        # Get all of the related objects we need to repoint
-        all_related_objects = (
-            f for f in model._meta.get_fields(include_hidden=True)
-            if f.auto_created and not f.concrete and (not f.hidden or f.many_to_many)
-        )
-        # Rename the model
-        state.models[app_label, self.new_name_lower] = state.models[app_label, self.old_name_lower]
-        state.models[app_label, self.new_name_lower].name = self.new_name
+        # Add a new model.
+        renamed_model = state.models[app_label, self.old_name_lower].clone()
+        renamed_model.name = self.new_name
+        state.models[app_label, self.new_name_lower] = renamed_model
+        # Repoint all fields pointing to the old model to the new one.
+        old_model_tuple = app_label, self.old_name_lower
+        new_remote_model = '%s.%s' % (app_label, self.new_name)
+        to_reload = []
+        for (model_app_label, model_name), model_state in state.models.items():
+            model_changed = False
+            for index, (name, field) in enumerate(model_state.fields):
+                changed_field = None
+                remote_field = field.remote_field
+                if remote_field:
+                    remote_model_tuple = self._get_model_tuple(
+                        remote_field.model, model_app_label, model_name
+                    )
+                    if remote_model_tuple == old_model_tuple:
+                        changed_field = field.clone()
+                        changed_field.remote_field.model = new_remote_model
+                    through_model = getattr(remote_field, 'through', None)
+                    if through_model:
+                        through_model_tuple = self._get_model_tuple(
+                            through_model, model_app_label, model_name
+                        )
+                        if through_model_tuple == old_model_tuple:
+                            if changed_field is None:
+                                changed_field = field.clone()
+                            changed_field.remote_field.through = new_remote_model
+                if changed_field:
+                    model_state.fields[index] = name, changed_field
+                    model_changed = True
+            if model_changed:
+                to_reload.append((model_app_label, model_name))
+        # Reload models related to old model before removing the old model.
+        state.reload_models(to_reload, delay=True)
+        # Remove the old model.
         state.remove_model(app_label, self.old_name_lower)
-        # Repoint the FKs and M2Ms pointing to us
-        for related_object in all_related_objects:
-            if related_object.model is not model:
-                # The model being renamed does not participate in this relation
-                # directly. Rather, a superclass does.
-                continue
-            # Use the new related key for self referential related objects.
-            if related_object.related_model == model:
-                related_key = (app_label, self.new_name_lower)
-            else:
-                related_key = (
-                    related_object.related_model._meta.app_label,
-                    related_object.related_model._meta.model_name,
-                )
-            new_fields = []
-            for name, field in state.models[related_key].fields:
-                if name == related_object.field.name:
-                    field = field.clone()
-                    field.remote_field.model = "%s.%s" % (app_label, self.new_name)
-                new_fields.append((name, field))
-            state.models[related_key].fields = new_fields
-            state.reload_model(*related_key)
-        # Repoint M2Ms with through pointing to us
-        related_models = {
-            f.remote_field.model for f in model._meta.fields
-            if getattr(f.remote_field, 'model', None)
-        }
-        model_name = '%s.%s' % (app_label, self.old_name)
-        for related_model in related_models:
-            if related_model == model:
-                related_key = (app_label, self.new_name_lower)
-            else:
-                related_key = (related_model._meta.app_label, related_model._meta.model_name)
-            new_fields = []
-            changed = False
-            for name, field in state.models[related_key].fields:
-                if field.is_relation and field.many_to_many and field.remote_field.through == model_name:
-                    field = field.clone()
-                    field.remote_field.through = '%s.%s' % (app_label, self.new_name)
-                    changed = True
-                new_fields.append((name, field))
-            if changed:
-                state.models[related_key].fields = new_fields
-                state.reload_model(*related_key)
-        state.reload_model(app_label, self.new_name_lower)
+        state.reload_model(app_label, self.new_name_lower, delay=True)
 
     def database_forwards(self, app_label, schema_editor, from_state, to_state):
         new_model = to_state.apps.get_model(app_label, self.new_name)
@@ -420,13 +417,11 @@ class RenameModel(ModelOperation):
 
 
 class AlterModelTable(ModelOperation):
-    """
-    Renames a model's table
-    """
+    """Rename a model's table."""
 
     def __init__(self, name, table):
         self.table = table
-        super(AlterModelTable, self).__init__(name)
+        super().__init__(name)
 
     def deconstruct(self):
         kwargs = {
@@ -434,14 +429,14 @@ class AlterModelTable(ModelOperation):
             'table': self.table,
         }
         return (
-            self.__class__.__name__,
+            self.__class__.__qualname__,
             [],
             kwargs
         )
 
     def state_forwards(self, app_label, state):
         state.models[app_label, self.name_lower].options["db_table"] = self.table
-        state.reload_model(app_label, self.name_lower)
+        state.reload_model(app_label, self.name_lower, delay=True)
 
     def database_forwards(self, app_label, schema_editor, from_state, to_state):
         new_model = to_state.apps.get_model(app_label, self.name)
@@ -465,19 +460,22 @@ class AlterModelTable(ModelOperation):
         return self.database_forwards(app_label, schema_editor, from_state, to_state)
 
     def describe(self):
-        return "Rename table for %s to %s" % (self.name, self.table)
+        return "Rename table for %s to %s" % (
+            self.name,
+            self.table if self.table is not None else "(default)"
+        )
 
     def reduce(self, operation, in_between, app_label=None):
         if isinstance(operation, (AlterModelTable, DeleteModel)) and self.name_lower == operation.name_lower:
             return [operation]
-        return super(AlterModelTable, self).reduce(operation, in_between, app_label=app_label)
+        return super().reduce(operation, in_between, app_label=app_label)
 
 
 class ModelOptionOperation(ModelOperation):
     def reduce(self, operation, in_between, app_label=None):
         if isinstance(operation, (self.__class__, DeleteModel)) and self.name_lower == operation.name_lower:
             return [operation]
-        return super(ModelOptionOperation, self).reduce(operation, in_between, app_label=app_label)
+        return super().reduce(operation, in_between, app_label=app_label)
 
 
 class FieldRelatedOptionOperation(ModelOptionOperation):
@@ -486,20 +484,20 @@ class FieldRelatedOptionOperation(ModelOptionOperation):
                 self.name_lower == operation.model_name_lower and
                 not self.references_field(operation.model_name, operation.name)):
             return [operation, self]
-        return super(FieldRelatedOptionOperation, self).reduce(operation, in_between, app_label=app_label)
+        return super().reduce(operation, in_between, app_label=app_label)
 
 
 class AlterUniqueTogether(FieldRelatedOptionOperation):
     """
-    Changes the value of unique_together to the target one.
+    Change the value of unique_together to the target one.
     Input value of unique_together must be a set of tuples.
     """
     option_name = "unique_together"
 
     def __init__(self, name, unique_together):
         unique_together = normalize_together(unique_together)
-        self.unique_together = set(tuple(cons) for cons in unique_together)
-        super(AlterUniqueTogether, self).__init__(name)
+        self.unique_together = {tuple(cons) for cons in unique_together}
+        super().__init__(name)
 
     def deconstruct(self):
         kwargs = {
@@ -507,7 +505,7 @@ class AlterUniqueTogether(FieldRelatedOptionOperation):
             'unique_together': self.unique_together,
         }
         return (
-            self.__class__.__name__,
+            self.__class__.__qualname__,
             [],
             kwargs
         )
@@ -515,7 +513,7 @@ class AlterUniqueTogether(FieldRelatedOptionOperation):
     def state_forwards(self, app_label, state):
         model_state = state.models[app_label, self.name_lower]
         model_state.options[self.option_name] = self.unique_together
-        state.reload_model(app_label, self.name_lower)
+        state.reload_model(app_label, self.name_lower, delay=True)
 
     def database_forwards(self, app_label, schema_editor, from_state, to_state):
         new_model = to_state.apps.get_model(app_label, self.name)
@@ -545,15 +543,15 @@ class AlterUniqueTogether(FieldRelatedOptionOperation):
 
 class AlterIndexTogether(FieldRelatedOptionOperation):
     """
-    Changes the value of index_together to the target one.
+    Change the value of index_together to the target one.
     Input value of index_together must be a set of tuples.
     """
     option_name = "index_together"
 
     def __init__(self, name, index_together):
         index_together = normalize_together(index_together)
-        self.index_together = set(tuple(cons) for cons in index_together)
-        super(AlterIndexTogether, self).__init__(name)
+        self.index_together = {tuple(cons) for cons in index_together}
+        super().__init__(name)
 
     def deconstruct(self):
         kwargs = {
@@ -561,7 +559,7 @@ class AlterIndexTogether(FieldRelatedOptionOperation):
             'index_together': self.index_together,
         }
         return (
-            self.__class__.__name__,
+            self.__class__.__qualname__,
             [],
             kwargs
         )
@@ -569,7 +567,7 @@ class AlterIndexTogether(FieldRelatedOptionOperation):
     def state_forwards(self, app_label, state):
         model_state = state.models[app_label, self.name_lower]
         model_state.options[self.option_name] = self.index_together
-        state.reload_model(app_label, self.name_lower)
+        state.reload_model(app_label, self.name_lower, delay=True)
 
     def database_forwards(self, app_label, schema_editor, from_state, to_state):
         new_model = to_state.apps.get_model(app_label, self.name)
@@ -598,13 +596,11 @@ class AlterIndexTogether(FieldRelatedOptionOperation):
 
 
 class AlterOrderWithRespectTo(FieldRelatedOptionOperation):
-    """
-    Represents a change with the order_with_respect_to option.
-    """
+    """Represent a change with the order_with_respect_to option."""
 
     def __init__(self, name, order_with_respect_to):
         self.order_with_respect_to = order_with_respect_to
-        super(AlterOrderWithRespectTo, self).__init__(name)
+        super().__init__(name)
 
     def deconstruct(self):
         kwargs = {
@@ -612,7 +608,7 @@ class AlterOrderWithRespectTo(FieldRelatedOptionOperation):
             'order_with_respect_to': self.order_with_respect_to,
         }
         return (
-            self.__class__.__name__,
+            self.__class__.__qualname__,
             [],
             kwargs
         )
@@ -620,7 +616,7 @@ class AlterOrderWithRespectTo(FieldRelatedOptionOperation):
     def state_forwards(self, app_label, state):
         model_state = state.models[app_label, self.name_lower]
         model_state.options['order_with_respect_to'] = self.order_with_respect_to
-        state.reload_model(app_label, self.name_lower)
+        state.reload_model(app_label, self.name_lower, delay=True)
 
     def database_forwards(self, app_label, schema_editor, from_state, to_state):
         to_model = to_state.apps.get_model(app_label, self.name)
@@ -658,7 +654,7 @@ class AlterOrderWithRespectTo(FieldRelatedOptionOperation):
 
 class AlterModelOptions(ModelOptionOperation):
     """
-    Sets new model options that don't directly affect the database schema
+    Set new model options that don't directly affect the database schema
     (like verbose_name, permissions, ordering). Python code in migrations
     may still need them.
     """
@@ -679,7 +675,7 @@ class AlterModelOptions(ModelOptionOperation):
 
     def __init__(self, name, options):
         self.options = options
-        super(AlterModelOptions, self).__init__(name)
+        super().__init__(name)
 
     def deconstruct(self):
         kwargs = {
@@ -687,7 +683,7 @@ class AlterModelOptions(ModelOptionOperation):
             'options': self.options,
         }
         return (
-            self.__class__.__name__,
+            self.__class__.__qualname__,
             [],
             kwargs
         )
@@ -699,7 +695,7 @@ class AlterModelOptions(ModelOptionOperation):
         for key in self.ALTER_OPTION_KEYS:
             if key not in self.options and key in model_state.options:
                 del model_state.options[key]
-        state.reload_model(app_label, self.name_lower)
+        state.reload_model(app_label, self.name_lower, delay=True)
 
     def database_forwards(self, app_label, schema_editor, from_state, to_state):
         pass
@@ -712,19 +708,17 @@ class AlterModelOptions(ModelOptionOperation):
 
 
 class AlterModelManagers(ModelOptionOperation):
-    """
-    Alters the model's managers
-    """
+    """Alter the model's managers."""
 
     serialization_expand_args = ['managers']
 
     def __init__(self, name, managers):
         self.managers = managers
-        super(AlterModelManagers, self).__init__(name)
+        super().__init__(name)
 
     def deconstruct(self):
         return (
-            self.__class__.__name__,
+            self.__class__.__qualname__,
             [self.name, self.managers],
             {}
         )
@@ -732,7 +726,7 @@ class AlterModelManagers(ModelOptionOperation):
     def state_forwards(self, app_label, state):
         model_state = state.models[app_label, self.name_lower]
         model_state.managers = list(self.managers)
-        state.reload_model(app_label, self.name_lower)
+        state.reload_model(app_label, self.name_lower, delay=True)
 
     def database_forwards(self, app_label, schema_editor, from_state, to_state):
         pass
@@ -753,13 +747,11 @@ class IndexOperation(Operation):
 
 
 class AddIndex(IndexOperation):
-    """
-    Add an index on a model.
-    """
+    """Add an index on a model."""
 
     def __init__(self, model_name, index):
         self.model_name = model_name
-        if not index._name:
+        if not index.name:
             raise ValueError(
                 "Indexes passed to AddIndex operations require a name "
                 "argument. %r doesn't have one." % index
@@ -768,7 +760,10 @@ class AddIndex(IndexOperation):
 
     def state_forwards(self, app_label, state):
         model_state = state.models[app_label, self.model_name_lower]
-        model_state.options[self.option_name].append(self.index)
+        indexes = list(model_state.options[self.option_name])
+        indexes.append(self.index.clone())
+        model_state.options[self.option_name] = indexes
+        state.reload_model(app_label, self.model_name_lower, delay=True)
 
     def database_forwards(self, app_label, schema_editor, from_state, to_state):
         model = to_state.apps.get_model(app_label, self.model_name)
@@ -786,22 +781,21 @@ class AddIndex(IndexOperation):
             'index': self.index,
         }
         return (
-            self.__class__.__name__,
+            self.__class__.__qualname__,
             [],
             kwargs,
         )
 
     def describe(self):
-        return 'Create index on field(s) %s of model %s' % (
+        return 'Create index %s on field(s) %s of model %s' % (
+            self.index.name,
             ', '.join(self.index.fields),
             self.model_name,
         )
 
 
 class RemoveIndex(IndexOperation):
-    """
-    Remove an index from a model.
-    """
+    """Remove an index from a model."""
 
     def __init__(self, model_name, name):
         self.model_name = model_name
@@ -811,6 +805,7 @@ class RemoveIndex(IndexOperation):
         model_state = state.models[app_label, self.model_name_lower]
         indexes = model_state.options[self.option_name]
         model_state.options[self.option_name] = [idx for idx in indexes if idx.name != self.name]
+        state.reload_model(app_label, self.model_name_lower, delay=True)
 
     def database_forwards(self, app_label, schema_editor, from_state, to_state):
         model = from_state.apps.get_model(app_label, self.model_name)
@@ -832,7 +827,7 @@ class RemoveIndex(IndexOperation):
             'name': self.name,
         }
         return (
-            self.__class__.__name__,
+            self.__class__.__qualname__,
             [],
             kwargs,
         )

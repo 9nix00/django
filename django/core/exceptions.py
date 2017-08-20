@@ -1,16 +1,10 @@
 """
 Global Django exception and warning classes.
 """
-from django.utils import six
-from django.utils.encoding import force_text
 
 
 class FieldDoesNotExist(Exception):
     """The requested model field does not exist"""
-    pass
-
-
-class DjangoRuntimeWarning(RuntimeWarning):
     pass
 
 
@@ -55,7 +49,7 @@ class DisallowedRedirect(SuspiciousOperation):
 
 class TooManyFieldsSent(SuspiciousOperation):
     """
-    The number of fields in a POST request exceeded
+    The number of fields in a GET or POST request exceeded
     settings.DATA_UPLOAD_MAX_NUMBER_FIELDS.
     """
     pass
@@ -110,15 +104,12 @@ class ValidationError(Exception):
         """
 
         # PY2 can't pickle naive exception: http://bugs.python.org/issue1692335.
-        super(ValidationError, self).__init__(message, code, params)
+        super().__init__(message, code, params)
 
         if isinstance(message, ValidationError):
             if hasattr(message, 'error_dict'):
                 message = message.error_dict
-            # PY2 has a `message` property which is always there so we can't
-            # duck-type on it. It was introduced in Python 2.5 and already
-            # deprecated in Python 2.6.
-            elif not hasattr(message, 'message' if six.PY3 else 'code'):
+            elif not hasattr(message, 'message'):
                 message = message.error_list
             else:
                 message, code, params = message.message, message.code, message.params
@@ -178,7 +169,7 @@ class ValidationError(Exception):
                 message = error.message
                 if error.params:
                     message %= error.params
-                yield force_text(message)
+                yield str(message)
 
     def __str__(self):
         if hasattr(self, 'error_dict'):
@@ -187,3 +178,8 @@ class ValidationError(Exception):
 
     def __repr__(self):
         return 'ValidationError(%s)' % self
+
+
+class EmptyResultSet(Exception):
+    """A database query predicate is impossible."""
+    pass

@@ -1,9 +1,10 @@
 import os
+import signal
 import subprocess
+from contextlib import suppress
 
 from django.core.files.temp import NamedTemporaryFile
 from django.db.backends.base.client import BaseDatabaseClient
-from django.utils.six import print_
 
 
 def _escape_pgpass(txt):
@@ -35,12 +36,15 @@ class DatabaseClient(BaseDatabaseClient):
         args += [dbname]
 
         temp_pgpass = None
+        sigint_handler = signal.getsignal(signal.SIGINT)
         try:
             if passwd:
                 # Create temporary .pgpass file.
                 temp_pgpass = NamedTemporaryFile(mode='w+')
-                try:
-                    print_(
+                # If the current locale can't encode the data, let the user
+                # input the password manually.
+                with suppress(UnicodeEncodeError):
+                    print(
                         _escape_pgpass(host) or '*',
                         str(port) or '*',
                         _escape_pgpass(dbname) or '*',
@@ -51,12 +55,12 @@ class DatabaseClient(BaseDatabaseClient):
                         flush=True,
                     )
                     os.environ['PGPASSFILE'] = temp_pgpass.name
-                except UnicodeEncodeError:
-                    # If the current locale can't encode the data, we let
-                    # the user input the password manually.
-                    pass
+            # Allow SIGINT to pass to psql to abort queries.
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
             subprocess.check_call(args)
         finally:
+            # Restore the orignal SIGINT handler.
+            signal.signal(signal.SIGINT, sigint_handler)
             if temp_pgpass:
                 temp_pgpass.close()
                 if 'PGPASSFILE' in os.environ:  # unit tests need cleanup

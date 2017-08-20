@@ -28,8 +28,6 @@ allows the field to have two "empty values", but it's important for the
 
 .. class:: Cast(expression, output_field)
 
-.. versionadded:: 1.10
-
 Forces the result type of ``expression`` to be the one from ``output_field``.
 
 Usage example::
@@ -37,7 +35,7 @@ Usage example::
     >>> from django.db.models import FloatField
     >>> from django.db.models.functions import Cast
     >>> Value.objects.create(integer=4)
-    >>> value = Value.objects.annotate(as_float=Cast('integer', FloatField)).get()
+    >>> value = Value.objects.annotate(as_float=Cast('integer', FloatField())).get()
     >>> print(value.as_float)
     4.0
 
@@ -76,11 +74,11 @@ Usage examples::
     A Python value passed to ``Coalesce`` on MySQL may be converted to an
     incorrect type unless explicitly cast to the correct database type:
 
-    >>> from django.db.models.expressions import RawSQL
+    >>> from django.db.models import DateTimeField
+    >>> from django.db.models.functions import Cast, Coalesce
     >>> from django.utils import timezone
     >>> now = timezone.now()
-    >>> now_sql = RawSQL("cast(%s as datetime)", (now,))
-    >>> Coalesce('updated', now_sql)
+    >>> Coalesce('updated', Cast(now, DateTimeField()))
 
 ``Concat``
 ==========
@@ -90,8 +88,9 @@ Usage examples::
 Accepts a list of at least two text fields or expressions and returns the
 concatenated text. Each argument must be of a text or char type. If you want
 to concatenate a ``TextField()`` with a ``CharField()``, then be sure to tell
-Django that the ``output_field`` should be a ``TextField()``. This is also
-required when concatenating a ``Value`` as in the example below.
+Django that the ``output_field`` should be a ``TextField()``. Specifying an
+``output_field`` is also required when concatenating a ``Value`` as in the
+example below.
 
 This function will never have a null result. On backends where a null argument
 results in the entire expression being null, Django will ensure that each null
@@ -104,8 +103,11 @@ Usage example::
     >>> from django.db.models.functions import Concat
     >>> Author.objects.create(name='Margaret Smith', goes_by='Maggie')
     >>> author = Author.objects.annotate(
-    ...    screen_name=Concat('name', V(' ('), 'goes_by', V(')'),
-    ...    output_field=CharField())).get()
+    ...     screen_name=Concat(
+    ...         'name', V(' ('), 'goes_by', V(')'),
+    ...         output_field=CharField()
+    ...     )
+    ... ).get()
     >>> print(author.screen_name)
     Margaret Smith (Maggie)
 
@@ -239,6 +241,41 @@ Usage example::
     ``Now()`` uses ``STATEMENT_TIMESTAMP`` instead. If you need the transaction
     timestamp, use :class:`django.contrib.postgres.functions.TransactionNow`.
 
+``StrIndex``
+============
+
+.. class:: StrIndex(string, substring, **extra)
+
+.. versionadded:: 2.0
+
+Returns a positive integer corresponding to the 1-indexed position of the first
+occurrence of ``substring`` inside ``string``, or 0 if ``substring`` is not
+found.
+
+Usage example::
+
+    >>> from django.db.models import Value as V
+    >>> from django.db.models.functions import StrIndex
+    >>> Author.objects.create(name='Margaret Smith')
+    >>> Author.objects.create(name='Smith, Margaret')
+    >>> Author.objects.create(name='Margaret Jackson')
+    >>> authors = Author.objects.annotate(
+    ...     smith_index=StrIndex('name', V('Smith'))
+    ... ).order_by('smith_index')
+    >>> authors.first().smith_index
+    0
+    >>> authors = Author.objects.annotate(
+    ...    smith_index=StrIndex('name', V('Smith'))
+    ... ).filter(smith_index__gt=0)
+    <QuerySet [<Author: Margaret Smith>, <Author: Smith, Margaret>]>
+
+.. warning::
+
+    In MySQL, a database table's :ref:`collation<mysql-collation>` determines
+    whether string comparisons (such as the ``expression`` and ``substring`` of
+    this function) are case-sensitive. Comparisons are case-insensitive by
+    default.
+
 ``Substr``
 ==========
 
@@ -281,8 +318,6 @@ Date Functions
 
 .. module:: django.db.models.functions.datetime
 
-.. versionadded:: 1.10
-
 We'll be using the following model in examples of each function::
 
     class Experiment(models.Model):
@@ -300,19 +335,25 @@ We'll be using the following model in examples of each function::
 
 Extracts a component of a date as a number.
 
-Takes an ``expression`` representing a ``DateField`` or ``DateTimeField`` and a
-``lookup_name``, and returns the part of the date referenced by ``lookup_name``
-as an ``IntegerField``. Django usually uses the databases' extract function, so
-you may use any ``lookup_name`` that your database supports. A ``tzinfo``
-subclass, usually provided by ``pytz``, can be passed to extract a value in a
-specific timezone.
+Takes an ``expression`` representing a ``DateField``, ``DateTimeField``,
+``TimeField``, or ``DurationField`` and a ``lookup_name``, and returns the part
+of the date referenced by ``lookup_name`` as an ``IntegerField``.
+Django usually uses the databases' extract function, so you may use any
+``lookup_name`` that your database supports. A ``tzinfo`` subclass, usually
+provided by ``pytz``, can be passed to extract a value in a specific timezone.
+
+.. versionchanged:: 2.0
+
+    Support for ``DurationField`` was added.
 
 Given the datetime ``2015-06-15 23:30:01.000321+00:00``, the built-in
 ``lookup_name``\s return:
 
 * "year": 2015
+* "quarter": 2
 * "month": 6
 * "day": 15
+* "week": 25
 * "week_day": 2
 * "hour": 23
 * "minute": 30
@@ -339,6 +380,14 @@ returned when this timezone is active will be the same as above except for:
         >>> dt = datetime(2015, 6, 15)
         >>> (dt.isoweekday() % 7) + 1
         2
+
+.. admonition:: ``week`` values
+
+    The ``week`` ``lookup_type`` is calculated based on `ISO-8601
+    <https://en.wikipedia.org/wiki/ISO-8601>`_, i.e.,
+    a week starts on a Monday. The first week is the one with the majority
+    of the days, i.e., a week that starts on or before Thursday. The value
+    returned is in the range 1 to 52 or 53.
 
 Each ``lookup_name`` above has a corresponding ``Extract`` subclass (listed
 below) that should typically be used instead of the more verbose equivalent,
@@ -382,6 +431,18 @@ Usage example::
 
     .. attribute:: lookup_name = 'week_day'
 
+.. class:: ExtractWeek(expression, tzinfo=None, **extra)
+
+    .. versionadded:: 1.11
+
+    .. attribute:: lookup_name = 'week'
+
+.. class:: ExtractQuarter(expression, tzinfo=None, **extra)
+
+    .. versionadded:: 2.0
+
+    .. attribute:: lookup_name = 'quarter'
+
 These are logically equivalent to ``Extract('date_field', lookup_name)``. Each
 class is also a ``Transform`` registered on ``DateField`` and ``DateTimeField``
 as ``__(lookup_name)``, e.g. ``__year``.
@@ -392,7 +453,8 @@ that deal with date-parts can be used with ``DateField``::
     >>> from datetime import datetime
     >>> from django.utils import timezone
     >>> from django.db.models.functions import (
-    ...    ExtractYear, ExtractMonth, ExtractDay, ExtractWeekDay
+    ...     ExtractDay, ExtractMonth, ExtractQuarter, ExtractWeek,
+    ...     ExtractWeekDay, ExtractYear,
     ... )
     >>> start_2015 = datetime(2015, 6, 15, 23, 30, 1, tzinfo=timezone.utc)
     >>> end_2015 = datetime(2015, 6, 16, 13, 11, 27, tzinfo=timezone.utc)
@@ -401,13 +463,15 @@ that deal with date-parts can be used with ``DateField``::
     ...    end_datetime=end_2015, end_date=end_2015.date())
     >>> Experiment.objects.annotate(
     ...     year=ExtractYear('start_date'),
+    ...     quarter=ExtractQuarter('start_date'),
     ...     month=ExtractMonth('start_date'),
+    ...     week=ExtractWeek('start_date'),
     ...     day=ExtractDay('start_date'),
     ...     weekday=ExtractWeekDay('start_date'),
-    ... ).values('year', 'month', 'day', 'weekday').get(
+    ... ).values('year', 'quarter', 'month', 'week', 'day', 'weekday').get(
     ...     end_date__year=ExtractYear('start_date'),
     ... )
-    {'year': 2015, 'month': 6, 'day': 15, 'weekday': 2}
+    {'year': 2015, 'quarter': 2, 'month': 6, 'week': 25, 'day': 15, 'weekday': 2}
 
 ``DateTimeField`` extracts
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -436,8 +500,9 @@ Each class is also a ``Transform`` registered on ``DateTimeField`` as
     >>> from datetime import datetime
     >>> from django.utils import timezone
     >>> from django.db.models.functions import (
-    ...    ExtractYear, ExtractMonth, ExtractDay, ExtractWeekDay,
-    ...    ExtractHour, ExtractMinute, ExtractSecond,
+    ...     ExtractDay, ExtractHour, ExtractMinute, ExtractMonth,
+    ...     ExtractQuarter, ExtractSecond, ExtractWeek, ExtractWeekDay,
+    ...     ExtractYear,
     ... )
     >>> start_2015 = datetime(2015, 6, 15, 23, 30, 1, tzinfo=timezone.utc)
     >>> end_2015 = datetime(2015, 6, 16, 13, 11, 27, tzinfo=timezone.utc)
@@ -446,16 +511,19 @@ Each class is also a ``Transform`` registered on ``DateTimeField`` as
     ...    end_datetime=end_2015, end_date=end_2015.date())
     >>> Experiment.objects.annotate(
     ...     year=ExtractYear('start_datetime'),
+    ...     quarter=ExtractQuarter('start_datetime'),
     ...     month=ExtractMonth('start_datetime'),
+    ...     week=ExtractWeek('start_datetime'),
     ...     day=ExtractDay('start_datetime'),
     ...     weekday=ExtractWeekDay('start_datetime'),
     ...     hour=ExtractHour('start_datetime'),
     ...     minute=ExtractMinute('start_datetime'),
     ...     second=ExtractSecond('start_datetime'),
     ... ).values(
-    ...     'year', 'month', 'day', 'weekday', 'hour', 'minute', 'second',
+    ...     'year', 'month', 'week', 'day', 'weekday', 'hour', 'minute', 'second',
     ... ).get(end_datetime__year=ExtractYear('start_datetime'))
-    {'year': 2015, 'month': 6, 'day': 15, 'weekday': 2, 'hour': 23, 'minute': 30, 'second': 1}
+    {'year': 2015, 'quarter': 2, 'month': 6, 'week': 25, 'day': 15, 'weekday': 2,
+     'hour': 23, 'minute': 30, 'second': 1}
 
 When :setting:`USE_TZ` is ``True`` then datetimes are stored in the database
 in UTC. If a different timezone is active in Django, the datetime is converted
@@ -515,6 +583,7 @@ Given the datetime ``2015-06-15 14:30:50.000321+00:00``, the built-in ``kind``\s
 return:
 
 * "year": 2015-01-01 00:00:00+00:00
+* "quarter": 2015-04-01 00:00:00+00:00
 * "month": 2015-06-01 00:00:00+00:00
 * "day": 2015-06-15 00:00:00+00:00
 * "hour": 2015-06-15 14:00:00+00:00
@@ -527,6 +596,7 @@ The timezone offset for Melbourne in the example date above is +10:00. The
 values returned when this timezone is active will be:
 
 * "year": 2015-01-01 00:00:00+11:00
+* "quarter": 2015-04-01 00:00:00+10:00
 * "month": 2015-06-01 00:00:00+10:00
 * "day": 2015-06-16 00:00:00+10:00
 * "hour": 2015-06-16 00:00:00+10:00
@@ -579,6 +649,12 @@ Usage example::
 .. class:: TruncMonth(expression, output_field=None, tzinfo=None, **extra)
 
     .. attribute:: kind = 'month'
+
+.. class:: TruncQuarter(expression, output_field=None, tzinfo=None, **extra)
+
+    .. versionadded:: 2.0
+
+    .. attribute:: kind = 'quarter'
 
 These are logically equivalent to ``Trunc('date_field', kind)``. They truncate
 all parts of the date up to ``kind`` which allows grouping or filtering dates

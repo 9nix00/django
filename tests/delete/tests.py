@@ -1,11 +1,8 @@
-from __future__ import unicode_literals
-
 from math import ceil
 
 from django.db import IntegrityError, connection, models
 from django.db.models.sql.constants import GET_ITERATOR_CHUNK_SIZE
 from django.test import TestCase, skipIfDBFeature, skipUnlessDBFeature
-from django.utils.six.moves import range
 
 from .models import (
     MR, A, Avatar, Base, Child, HiddenUser, HiddenUserProfile, M, M2MFrom,
@@ -63,7 +60,11 @@ class OnDeleteTests(TestCase):
 
     def test_protect(self):
         a = create_a('protect')
-        with self.assertRaises(IntegrityError):
+        msg = (
+            "Cannot delete some instances of model 'R' because they are "
+            "referenced through a protected foreign key: 'A.protect'"
+        )
+        with self.assertRaisesMessage(IntegrityError, msg):
             a.protect.delete()
 
     def test_do_nothing(self):
@@ -83,7 +84,7 @@ class OnDeleteTests(TestCase):
 
     def test_do_nothing_qscount(self):
         """
-        Test that a models.DO_NOTHING relation doesn't trigger a query.
+        A models.DO_NOTHING relation doesn't trigger a query.
         """
         b = Base.objects.create()
         with self.assertNumQueries(1):
@@ -189,7 +190,7 @@ class DeletionTests(TestCase):
             obj = kwargs['instance']
             deleted.append(obj)
             if isinstance(obj, R):
-                related_setnull_sets.append(list(a.pk for a in obj.setnull_set.all()))
+                related_setnull_sets.append([a.pk for a in obj.setnull_set.all()])
 
         models.signals.pre_delete.connect(pre_delete)
         a = create_a('update_setnull')
@@ -359,6 +360,15 @@ class DeletionTests(TestCase):
         self.assertFalse(RChild.objects.filter(id=child.id).exists())
         self.assertTrue(R.objects.filter(id=parent_id).exists())
 
+    def test_delete_with_keeping_parents_relationships(self):
+        child = RChild.objects.create()
+        parent_id = child.r_ptr_id
+        parent_referent_id = S.objects.create(r=child.r_ptr).pk
+        child.delete(keep_parents=True)
+        self.assertFalse(RChild.objects.filter(id=child.id).exists())
+        self.assertTrue(R.objects.filter(id=parent_id).exists())
+        self.assertTrue(S.objects.filter(pk=parent_referent_id).exists())
+
     def test_queryset_delete_returns_num_rows(self):
         """
         QuerySet.delete() should return the number of deleted rows and a
@@ -475,11 +485,7 @@ class FastDeleteTests(TestCase):
         c = Child.objects.create()
         p = Parent.objects.create()
         # 1 for self, 1 for parent
-        # However, this doesn't work as child.parent access creates a query,
-        # and this means we will be generating extra queries (a lot for large
-        # querysets). This is not a fast-delete problem.
-        # self.assertNumQueries(2, c.delete)
-        c.delete()
+        self.assertNumQueries(2, c.delete)
         self.assertFalse(Child.objects.exists())
         self.assertEqual(Parent.objects.count(), 1)
         self.assertEqual(Parent.objects.filter(pk=p.pk).count(), 1)

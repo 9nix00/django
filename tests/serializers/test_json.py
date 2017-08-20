@@ -1,6 +1,4 @@
-# -*- coding: utf-8 -*-
-from __future__ import unicode_literals
-
+import datetime
 import decimal
 import json
 import re
@@ -11,7 +9,7 @@ from django.core.serializers.json import DjangoJSONEncoder
 from django.db import models
 from django.test import SimpleTestCase, TestCase, TransactionTestCase
 from django.test.utils import isolate_apps
-from django.utils.translation import override, ugettext_lazy
+from django.utils.translation import gettext_lazy, override
 
 from .models import Score
 from .tests import SerializersTestBase, SerializersTransactionTestBase
@@ -88,7 +86,7 @@ class JsonSerializerTestCase(SerializersTestBase, TestCase):
             def default(self, o):
                 if isinstance(o, decimal.Decimal):
                     return str(o)
-                return super(CustomJSONEncoder, self).default(o)
+                return super().default(o)
 
         s = serializers.json.Serializer()
         json_data = s.serialize(
@@ -294,11 +292,23 @@ class JsonSerializerTransactionTestCase(SerializersTransactionTestBase, Transact
 class DjangoJSONEncoderTests(SimpleTestCase):
     def test_lazy_string_encoding(self):
         self.assertEqual(
-            json.dumps({'lang': ugettext_lazy("French")}, cls=DjangoJSONEncoder),
+            json.dumps({'lang': gettext_lazy("French")}, cls=DjangoJSONEncoder),
             '{"lang": "French"}'
         )
         with override('fr'):
             self.assertEqual(
-                json.dumps({'lang': ugettext_lazy("French")}, cls=DjangoJSONEncoder),
+                json.dumps({'lang': gettext_lazy("French")}, cls=DjangoJSONEncoder),
                 '{"lang": "Fran\\u00e7ais"}'
             )
+
+    def test_timedelta(self):
+        duration = datetime.timedelta(days=1, hours=2, seconds=3)
+        self.assertEqual(
+            json.dumps({'duration': duration}, cls=DjangoJSONEncoder),
+            '{"duration": "P1DT02H00M03S"}'
+        )
+        duration = datetime.timedelta(0)
+        self.assertEqual(
+            json.dumps({'duration': duration}, cls=DjangoJSONEncoder),
+            '{"duration": "P0DT00H00M00S"}'
+        )

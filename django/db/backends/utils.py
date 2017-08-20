@@ -1,19 +1,19 @@
-from __future__ import unicode_literals
-
 import datetime
 import decimal
 import hashlib
 import logging
+import re
 from time import time
 
 from django.conf import settings
+from django.db.utils import NotSupportedError
 from django.utils.encoding import force_bytes
 from django.utils.timezone import utc
 
 logger = logging.getLogger('django.db.backends')
 
 
-class CursorWrapper(object):
+class CursorWrapper:
     def __init__(self, cursor, db):
         self.cursor = cursor
         self.db = db
@@ -29,16 +29,15 @@ class CursorWrapper(object):
 
     def __iter__(self):
         with self.db.wrap_database_errors:
-            for item in self.cursor:
-                yield item
+            yield from self.cursor
 
     def __enter__(self):
         return self
 
     def __exit__(self, type, value, traceback):
-        # Ticket #17671 - Close instead of passing thru to avoid backend
-        # specific behavior. Catch errors liberally because errors in cleanup
-        # code aren't useful.
+        # Close instead of passing through to avoid backend-specific behavior
+        # (#17671). Catch errors liberally because errors in cleanup code
+        # aren't useful.
         try:
             self.close()
         except self.db.Database.Error:
@@ -47,13 +46,23 @@ class CursorWrapper(object):
     # The following methods cannot be implemented in __getattr__, because the
     # code must run when the method is invoked, not just when it is accessed.
 
-    def callproc(self, procname, params=None):
+    def callproc(self, procname, params=None, kparams=None):
+        # Keyword parameters for callproc aren't supported in PEP 249, but the
+        # database driver may support them (e.g. cx_Oracle).
+        if kparams is not None and not self.db.features.supports_callproc_kwargs:
+            raise NotSupportedError(
+                'Keyword parameters for callproc are not supported on this '
+                'database backend.'
+            )
         self.db.validate_no_broken_transaction()
         with self.db.wrap_database_errors:
-            if params is None:
+            if params is None and kparams is None:
                 return self.cursor.callproc(procname)
-            else:
+            elif kparams is None:
                 return self.cursor.callproc(procname, params)
+            else:
+                params = params or ()
+                return self.cursor.callproc(procname, params, kparams)
 
     def execute(self, sql, params=None):
         self.db.validate_no_broken_transaction()
@@ -76,7 +85,7 @@ class CursorDebugWrapper(CursorWrapper):
     def execute(self, sql, params=None):
         start = time()
         try:
-            return super(CursorDebugWrapper, self).execute(sql, params)
+            return super().execute(sql, params)
         finally:
             stop = time()
             duration = stop - start
@@ -93,7 +102,7 @@ class CursorDebugWrapper(CursorWrapper):
     def executemany(self, sql, param_list):
         start = time()
         try:
-            return super(CursorDebugWrapper, self).executemany(sql, param_list)
+            return super().executemany(sql, param_list)
         finally:
             stop = time()
             duration = stop - start
@@ -116,7 +125,7 @@ class CursorDebugWrapper(CursorWrapper):
 ###############################################
 
 def typecast_date(s):
-    return datetime.date(*map(int, s.split('-'))) if s else None  # returns None if s is null
+    return datetime.date(*map(int, s.split('-'))) if s else None  # return None if s is null
 
 
 def typecast_time(s):  # does NOT store time zone information
@@ -138,8 +147,7 @@ def typecast_timestamp(s):  # does NOT store time zone information
     if ' ' not in s:
         return typecast_date(s)
     d, t = s.split()
-    # Extract timezone information, if it exists. Currently we just throw
-    # it away, but in the future we may make use of it.
+    # Extract timezone information, if it exists. Currently it's ignored.
     if '-' in t:
         t, tz = t.split('-', 1)
         tz = '-' + tz
@@ -163,12 +171,6 @@ def typecast_timestamp(s):  # does NOT store time zone information
     )
 
 
-def typecast_decimal(s):
-    if s is None or s == '':
-        return None
-    return decimal.Decimal(s)
-
-
 ###############################################
 # Converters from Python to database (string) #
 ###############################################
@@ -180,18 +182,24 @@ def rev_typecast_decimal(d):
 
 
 def truncate_name(name, length=None, hash_len=4):
-    """Shortens a string to a repeatable mangled version with the given length.
     """
-    if length is None or len(name) <= length:
+    Shorten a string to a repeatable mangled version with the given length.
+    If a quote stripped name contains a username, e.g. USERNAME"."TABLE,
+    truncate the table portion only.
+    """
+    match = re.match(r'([^"]+)"\."([^"]+)', name)
+    table_name = match.group(2) if match else name
+
+    if length is None or len(table_name) <= length:
         return name
 
-    hsh = hashlib.md5(force_bytes(name)).hexdigest()[:hash_len]
-    return '%s%s' % (name[:length - hash_len], hsh)
+    hsh = hashlib.md5(force_bytes(table_name)).hexdigest()[:hash_len]
+    return '%s%s%s' % (match.group(1) + '"."' if match else '', table_name[:length - hash_len], hsh)
 
 
 def format_number(value, max_digits, decimal_places):
     """
-    Formats a number into a string with the requisite number of digits and
+    Format a number into a string with the requisite number of digits and
     decimal places.
     """
     if value is None:
@@ -209,3 +217,13 @@ def format_number(value, max_digits, decimal_places):
     if decimal_places is not None:
         return "%.*f" % (decimal_places, value)
     return "{:f}".format(value)
+
+
+def strip_quotes(table_name):
+    """
+    Strip quotes off of quoted table names to make them safe for use in index
+    names, sequence names, etc. For example '"USER"."TABLE"' (an Oracle naming
+    scheme) becomes 'USER"."TABLE'.
+    """
+    has_quotes = table_name.startswith('"') and table_name.endswith('"')
+    return table_name[1:-1] if has_quotes else table_name

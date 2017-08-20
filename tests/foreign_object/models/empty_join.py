@@ -4,7 +4,6 @@ from django.db.models.fields.related import (
 )
 from django.db.models.lookups import StartsWith
 from django.db.models.query_utils import PathInfo
-from django.utils.encoding import python_2_unicode_compatible
 
 
 class CustomForeignObjectRel(ForeignObjectRel):
@@ -37,7 +36,7 @@ class StartsWithRelation(models.ForeignObject):
 
     def __init__(self, *args, **kwargs):
         kwargs['on_delete'] = models.DO_NOTHING
-        super(StartsWithRelation, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
     @property
     def field(self):
@@ -52,7 +51,7 @@ class StartsWithRelation(models.ForeignObject):
         return StartsWith(to_field.get_col(alias), from_field.get_col(related_alias))
 
     def get_joining_columns(self, reverse_join=False):
-        return tuple()
+        return ()
 
     def get_path_info(self):
         to_opts = self.remote_field.model._meta
@@ -65,7 +64,7 @@ class StartsWithRelation(models.ForeignObject):
         return [PathInfo(from_opts, to_opts, (to_opts.pk,), self.remote_field, False, False)]
 
     def contribute_to_class(self, cls, name, private_only=False):
-        super(StartsWithRelation, self).contribute_to_class(cls, name, private_only)
+        super().contribute_to_class(cls, name, private_only)
         setattr(cls, self.name, ReverseManyToOneDescriptor(self))
 
 
@@ -78,9 +77,8 @@ class BrokenContainsRelation(StartsWithRelation):
         return None
 
 
-@python_2_unicode_compatible
 class SlugPage(models.Model):
-    slug = models.CharField(max_length=20)
+    slug = models.CharField(max_length=20, unique=True)
     descendants = StartsWithRelation(
         'self',
         from_fields=['slug'],

@@ -1,11 +1,9 @@
-from __future__ import unicode_literals
-
+from contextlib import suppress
 from threading import local
+from urllib.parse import urlsplit, urlunsplit
 
-from django.utils import six
-from django.utils.encoding import force_text, iri_to_uri
+from django.utils.encoding import iri_to_uri
 from django.utils.functional import lazy
-from django.utils.six.moves.urllib.parse import urlsplit, urlunsplit
 from django.utils.translation import override
 
 from .exceptions import NoReverseMatch, Resolver404
@@ -36,7 +34,7 @@ def reverse(viewname, urlconf=None, args=None, kwargs=None, current_app=None):
 
     prefix = get_script_prefix()
 
-    if not isinstance(viewname, six.string_types):
+    if not isinstance(viewname, str):
         view = viewname
     else:
         parts = viewname.split(':')
@@ -56,7 +54,7 @@ def reverse(viewname, urlconf=None, args=None, kwargs=None, current_app=None):
             ns = path.pop()
             current_ns = current_path.pop() if current_path else None
             # Lookup the name to see if it could be an app identifier.
-            try:
+            with suppress(KeyError):
                 app_list = resolver.app_dict[ns]
                 # Yes! Path part matches an app in the current Resolver.
                 if current_ns and current_ns in app_list:
@@ -67,8 +65,6 @@ def reverse(viewname, urlconf=None, args=None, kwargs=None, current_app=None):
                     # The name isn't shared by one of the instances (i.e.,
                     # the default) so pick the first instance as the default.
                     ns = app_list[0]
-            except KeyError:
-                pass
 
             if ns != current_ns:
                 current_path = None
@@ -88,9 +84,10 @@ def reverse(viewname, urlconf=None, args=None, kwargs=None, current_app=None):
         if ns_pattern:
             resolver = get_ns_resolver(ns_pattern, resolver)
 
-    return force_text(iri_to_uri(resolver._reverse_with_prefix(view, prefix, *args, **kwargs)))
+    return iri_to_uri(resolver._reverse_with_prefix(view, prefix, *args, **kwargs))
 
-reverse_lazy = lazy(reverse, six.text_type)
+
+reverse_lazy = lazy(reverse, str)
 
 
 def clear_url_caches():
@@ -121,10 +118,8 @@ def clear_script_prefix():
     """
     Unset the script prefix for the current thread.
     """
-    try:
+    with suppress(AttributeError):
         del _prefixes.value
-    except AttributeError:
-        pass
 
 
 def set_urlconf(urlconf_name):

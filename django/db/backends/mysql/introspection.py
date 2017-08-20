@@ -1,3 +1,4 @@
+import warnings
 from collections import namedtuple
 
 from MySQLdb.constants import FIELD_TYPE
@@ -5,11 +6,12 @@ from MySQLdb.constants import FIELD_TYPE
 from django.db.backends.base.introspection import (
     BaseDatabaseIntrospection, FieldInfo, TableInfo,
 )
+from django.db.models.indexes import Index
 from django.utils.datastructures import OrderedSet
-from django.utils.encoding import force_text
+from django.utils.deprecation import RemovedInDjango21Warning
 
-FieldInfo = namedtuple('FieldInfo', FieldInfo._fields + ('extra', 'default'))
-InfoLine = namedtuple('InfoLine', 'col_name data_type max_len num_prec num_scale extra column_default')
+FieldInfo = namedtuple('FieldInfo', FieldInfo._fields + ('extra', 'is_unsigned'))
+InfoLine = namedtuple('InfoLine', 'col_name data_type max_len num_prec num_scale extra column_default is_unsigned')
 
 
 class DatabaseIntrospection(BaseDatabaseIntrospection):
@@ -37,26 +39,29 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
     }
 
     def get_field_type(self, data_type, description):
-        field_type = super(DatabaseIntrospection, self).get_field_type(data_type, description)
+        field_type = super().get_field_type(data_type, description)
         if 'auto_increment' in description.extra:
             if field_type == 'IntegerField':
                 return 'AutoField'
             elif field_type == 'BigIntegerField':
                 return 'BigAutoField'
-
+        if description.is_unsigned:
+            if field_type == 'IntegerField':
+                return 'PositiveIntegerField'
+            elif field_type == 'SmallIntegerField':
+                return 'PositiveSmallIntegerField'
         return field_type
 
     def get_table_list(self, cursor):
-        """
-        Returns a list of table and view names in the current database.
-        """
+        """Return a list of table and view names in the current database."""
         cursor.execute("SHOW FULL TABLES")
         return [TableInfo(row[0], {'BASE TABLE': 't', 'VIEW': 'v'}.get(row[1]))
                 for row in cursor.fetchall()]
 
     def get_table_description(self, cursor, table_name):
         """
-        Returns a description of the table, with the DB-API cursor.description interface."
+        Return a description of the table with the DB-API cursor.description
+        interface."
         """
         # information_schema database gives more accurate results for some figures:
         # - varchar length returned by cursor.description is an internal length,
@@ -64,8 +69,13 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
         # - precision and scale (for decimal fields) (#5014)
         # - auto_increment is not available in cursor.description
         cursor.execute("""
-            SELECT column_name, data_type, character_maximum_length, numeric_precision,
-                   numeric_scale, extra, column_default
+            SELECT
+                column_name, data_type, character_maximum_length,
+                numeric_precision, numeric_scale, extra, column_default,
+                CASE
+                    WHEN column_type LIKE '%% unsigned' THEN 1
+                    ELSE 0
+                END AS is_unsigned
             FROM information_schema.columns
             WHERE table_name = %s AND table_schema = DATABASE()""", [table_name])
         field_info = {line[0]: InfoLine(*line) for line in cursor.fetchall()}
@@ -77,7 +87,7 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
 
         fields = []
         for line in cursor.description:
-            col_name = force_text(line[0])
+            col_name = line[0]
             fields.append(
                 FieldInfo(*(
                     (col_name,) +
@@ -87,8 +97,9 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
                         to_int(field_info[col_name].num_prec) or line[4],
                         to_int(field_info[col_name].num_scale) or line[5],
                         line[6],
-                        field_info[col_name].extra,
                         field_info[col_name].column_default,
+                        field_info[col_name].extra,
+                        field_info[col_name].is_unsigned,
                     )
                 ))
             )
@@ -96,7 +107,7 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
 
     def get_relations(self, cursor, table_name):
         """
-        Returns a dictionary of {field_name: (field_name_other_table, other_table)}
+        Return a dictionary of {field_name: (field_name_other_table, other_table)}
         representing all relationships to the given table.
         """
         constraints = self.get_key_columns(cursor, table_name)
@@ -107,8 +118,8 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
 
     def get_key_columns(self, cursor, table_name):
         """
-        Returns a list of (column_name, referenced_table_name, referenced_column_name) for all
-        key columns in given table.
+        Return a list of (column_name, referenced_table_name, referenced_column_name)
+        for all key columns in the given table.
         """
         key_columns = []
         cursor.execute("""
@@ -122,6 +133,10 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
         return key_columns
 
     def get_indexes(self, cursor, table_name):
+        warnings.warn(
+            "get_indexes() is deprecated in favor of get_constraints().",
+            RemovedInDjango21Warning, stacklevel=2
+        )
         cursor.execute("SHOW INDEX FROM %s" % self.connection.ops.quote_name(table_name))
         # Do a two-pass search for indexes: on first pass check which indexes
         # are multicolumn, on second pass check which single-column indexes
@@ -146,7 +161,7 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
 
     def get_storage_engine(self, cursor, table_name):
         """
-        Retrieves the storage engine for a given table. Returns the default
+        Retrieve the storage engine for a given table. Return the default
         storage engine if the table doesn't exist.
         """
         cursor.execute(
@@ -160,7 +175,8 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
 
     def get_constraints(self, cursor, table_name):
         """
-        Retrieves any constraints or keys (unique, pk, fk, check, index) across one or more columns.
+        Retrieve any constraints or keys (unique, pk, fk, check, index) across
+        one or more columns.
         """
         constraints = {}
         # Get the actual constraint names and columns
@@ -201,17 +217,17 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
                 constraints[constraint]['unique'] = True
         # Now add in the indexes
         cursor.execute("SHOW INDEX FROM %s" % self.connection.ops.quote_name(table_name))
-        for table, non_unique, index, colseq, column in [x[:5] for x in cursor.fetchall()]:
+        for table, non_unique, index, colseq, column, type_ in [x[:5] + (x[10],) for x in cursor.fetchall()]:
             if index not in constraints:
                 constraints[index] = {
                     'columns': OrderedSet(),
                     'primary_key': False,
                     'unique': False,
-                    'index': True,
                     'check': False,
                     'foreign_key': None,
                 }
             constraints[index]['index'] = True
+            constraints[index]['type'] = Index.suffix if type_ == 'BTREE' else type_.lower()
             constraints[index]['columns'].add(column)
         # Convert the sorted sets to lists
         for constraint in constraints.values():

@@ -149,7 +149,7 @@ when all the tests have been executed.
 You can prevent the test databases from being destroyed by using the
 :option:`test --keepdb` option. This will preserve the test database between
 runs. If the database does not exist, it will first be created. Any migrations
-will also be applied in order to keep it p to date.
+will also be applied in order to keep it up to date.
 
 The default test database names are created by prepending ``test_`` to the
 value of each :setting:`NAME` in :setting:`DATABASES`. When using SQLite, the
@@ -177,9 +177,9 @@ control the particular collation used by the test database. See the
 :doc:`settings documentation </ref/settings>` for details of these
 and other advanced settings.
 
-If using an SQLite in-memory database with Python 3.4+ and SQLite 3.7.13+,
-`shared cache <https://www.sqlite.org/sharedcache.html>`_ will be enabled, so
-you can write tests with ability to share the database between threads.
+If using an SQLite in-memory database with SQLite 3.7.13+, `shared cache
+<https://www.sqlite.org/sharedcache.html>`_ is enabled, so you can write tests
+with ability to share the database between threads.
 
 .. admonition:: Finding data from your production database when running tests?
 

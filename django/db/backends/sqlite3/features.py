@@ -1,16 +1,8 @@
-from __future__ import unicode_literals
-
 from django.db import utils
 from django.db.backends.base.features import BaseDatabaseFeatures
-from django.utils import six
 from django.utils.functional import cached_property
 
 from .base import Database
-
-try:
-    import pytz
-except ImportError:
-    pytz = None
 
 
 class DatabaseFeatures(BaseDatabaseFeatures):
@@ -22,11 +14,9 @@ class DatabaseFeatures(BaseDatabaseFeatures):
     test_db_allows_multiple_connections = False
     supports_unspecified_pk = True
     supports_timezones = False
-    supports_1000_query_parameters = False
+    max_query_params = 999
     supports_mixed_date_datetime_comparisons = False
     has_bulk_insert = True
-    can_combine_inserts_with_and_without_auto_increment_pk = False
-    supports_foreign_keys = False
     supports_column_check_constraints = False
     autocommits_when_autocommit_is_off = True
     can_introspect_decimal_field = False
@@ -39,11 +29,16 @@ class DatabaseFeatures(BaseDatabaseFeatures):
     supports_sequence_reset = False
     can_clone_databases = True
     supports_temporal_subtraction = True
-    ignores_quoted_identifier_case = True
+    ignores_table_name_case = True
+    supports_cast_with_precision = False
 
     @cached_property
     def uses_savepoints(self):
         return Database.sqlite_version_info >= (3, 6, 8)
+
+    @cached_property
+    def supports_index_column_ordering(self):
+        return Database.sqlite_version_info >= (3, 3, 0)
 
     @cached_property
     def can_release_savepoints(self):
@@ -52,19 +47,18 @@ class DatabaseFeatures(BaseDatabaseFeatures):
     @cached_property
     def can_share_in_memory_db(self):
         return (
-            six.PY3 and
             Database.__name__ == 'sqlite3.dbapi2' and
             Database.sqlite_version_info >= (3, 7, 13)
         )
 
     @cached_property
     def supports_stddev(self):
-        """Confirm support for STDDEV and related stats functions
+        """
+        Confirm support for STDDEV and related stats functions.
 
         SQLite supports STDDEV as an extension package; so
         connection.ops.check_expression_support() can't unilaterally
-        rule out support for STDDEV. We need to manually check
-        whether the call works.
+        rule out support for STDDEV. Manually check whether the call works.
         """
         with self.connection.cursor() as cursor:
             cursor.execute('CREATE TABLE STDDEV_TEST (X INT)')
@@ -75,7 +69,3 @@ class DatabaseFeatures(BaseDatabaseFeatures):
                 has_support = False
             cursor.execute('DROP TABLE STDDEV_TEST')
         return has_support
-
-    @cached_property
-    def has_zoneinfo_database(self):
-        return pytz is not None

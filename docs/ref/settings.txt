@@ -9,9 +9,9 @@ Settings
 .. warning::
 
     Be careful when you override settings, especially when the default value
-    is a non-empty list or dictionary, such as :setting:`MIDDLEWARE_CLASSES`
-    and :setting:`STATICFILES_FINDERS`. Make sure you keep the components
-    required by the features of Django you wish to use.
+    is a non-empty list or dictionary, such as :setting:`STATICFILES_FINDERS`.
+    Make sure you keep the components required by the features of Django you
+    wish to use.
 
 Core Settings
 =============
@@ -90,8 +90,10 @@ If the ``Host`` header (or ``X-Forwarded-Host`` if
 list, the :meth:`django.http.HttpRequest.get_host()` method will raise
 :exc:`~django.core.exceptions.SuspiciousOperation`.
 
-When :setting:`DEBUG` is ``True``, host validation is disabled; any host will
-be accepted. ``ALLOWED_HOSTS`` is :ref:`checked when running tests
+When :setting:`DEBUG` is ``True`` and ``ALLOWED_HOSTS`` is empty, the host
+is validated against ``['localhost', '127.0.0.1', '[::1]']``.
+
+``ALLOWED_HOSTS`` is also :ref:`checked when running tests
 <topics-testing-advanced-multiple-hosts>`.
 
 This validation only applies via :meth:`~django.http.HttpRequest.get_host()`;
@@ -101,6 +103,10 @@ are bypassing this security protection.
 .. versionchanged:: 1.11
 
     In older versions, ``ALLOWED_HOSTS`` wasn't checked when running tests.
+
+    In older versions, ``ALLOWED_HOSTS`` wasn't checked if ``DEBUG=True``.
+    This was also changed in Django 1.10.3, 1.9.11, and 1.8.16 to prevent a
+    DNS rebinding attack.
 
 .. setting:: APPEND_SLASH
 
@@ -220,7 +226,7 @@ Extra parameters to pass to the cache backend. Available parameters
 vary depending on your cache backend.
 
 Some information on available parameters can be found in the
-:doc:`Cache Backends </topics/cache>` documentation. For more information,
+:ref:`cache arguments <cache_arguments>` documentation. For more information,
 consult your backend module's own documentation.
 
 .. setting:: CACHES-TIMEOUT
@@ -328,10 +334,18 @@ Default: ``False``
 Whether to use ``HttpOnly`` flag on the CSRF cookie. If this is set to
 ``True``, client-side JavaScript will not to be able to access the CSRF cookie.
 
-This can help prevent malicious JavaScript from bypassing CSRF protection. If
-you enable this and need to send the value of the CSRF token with Ajax requests,
-your JavaScript will need to pull the value from a hidden CSRF token form input
-on the page instead of from the cookie.
+Designating the CSRF cookie as ``HttpOnly`` doesn't offer any practical
+protection because CSRF is only to protect against cross-domain attacks. If an
+attacker can read the cookie via JavaScript, they're already on the same domain
+as far as the browser knows, so they can do anything they like anyway. (XSS is
+a much bigger hole than CSRF.)
+
+Although the setting offers little practical benefit, it's sometimes required
+by security auditors.
+
+If you enable this and need to send the value of the CSRF token with an AJAX
+request, your JavaScript must pull the value from a hidden CSRF token form
+input on the page instead of from the cookie.
 
 See :setting:`SESSION_COOKIE_HTTPONLY` for details on ``HttpOnly``.
 
@@ -371,6 +385,22 @@ Whether to use a secure cookie for the CSRF cookie. If this is set to ``True``,
 the cookie will be marked as "secure," which means browsers may ensure that the
 cookie is only sent with an HTTPS connection.
 
+.. setting:: CSRF_USE_SESSIONS
+
+``CSRF_USE_SESSIONS``
+---------------------
+
+.. versionadded:: 1.11
+
+Default: ``False``
+
+Whether to store the CSRF token in the user's session instead of in a cookie.
+It requires the use of :mod:`django.contrib.sessions`.
+
+Storing the CSRF token in a cookie (Django's default) is safe, but storing it
+in the session is common practice in other web frameworks and therefore
+sometimes demanded by security auditors.
+
 .. setting:: CSRF_FAILURE_VIEW
 
 ``CSRF_FAILURE_VIEW``
@@ -392,11 +422,6 @@ an :class:`~django.http.HttpResponseForbidden`.
 ``django.views.csrf.csrf_failure()`` accepts an additional ``template_name``
 parameter that defaults to ``'403_csrf.html'``. If a template with that name
 exists, it will be used to render the page.
-
-.. versionchanged:: 1.10
-
-   The ``template_name`` parameter and the behavior of searching for a template
-   called ``403_csrf.html`` were added to ``csrf_failure()``.
 
 .. setting:: CSRF_HEADER_NAME
 
@@ -607,8 +632,6 @@ This allows interacting with third-party databases that store datetimes in
 local time rather than UTC. To avoid issues around DST changes, you shouldn't
 set this option for databases managed by Django.
 
-Setting this option requires installing pytz_.
-
 When :setting:`USE_TZ` is ``True`` and the database doesn't support time zones
 (e.g. SQLite, MySQL, Oracle), Django reads and writes datetimes in local time
 according to this option if it is set and in UTC if it isn't.
@@ -618,7 +641,20 @@ PostgreSQL), it is an error to set this option.
 
 When :setting:`USE_TZ` is ``False``, it is an error to set this option.
 
-.. _pytz: http://pytz.sourceforge.net/
+.. setting:: DATABASE-DISABLE_SERVER_SIDE_CURSORS
+
+``DISABLE_SERVER_SIDE_CURSORS``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. versionadded:: 1.11.1
+
+Default: ``False``
+
+Set this to ``True`` if you want to disable the use of server-side cursors with
+:meth:`.QuerySet.iterator`. :ref:`transaction-pooling-server-side-cursors`
+describes the use case.
+
+This is a PostgreSQL-specific setting.
 
 .. setting:: USER
 
@@ -667,8 +703,8 @@ backend-specific.
 
 Supported by the PostgreSQL_ (``postgresql``) and MySQL_ (``mysql``) backends.
 
-.. _PostgreSQL: http://www.postgresql.org/docs/current/static/multibyte.html
-.. _MySQL: https://dev.mysql.com/doc/refman/5.6/en/charset-database.html
+.. _PostgreSQL: https://www.postgresql.org/docs/current/static/multibyte.html
+.. _MySQL: https://dev.mysql.com/doc/refman/en/charset-database.html
 
 .. setting:: TEST_COLLATION
 
@@ -695,17 +731,6 @@ which has no dependencies.
 The creation-order dependencies of the database. See the documentation
 on :ref:`controlling the creation order of test databases
 <topics-testing-creation-dependencies>` for details.
-
-.. setting:: TEST_MIGRATE
-
-``MIGRATE``
-^^^^^^^^^^^
-
-.. versionadded:: 1.10
-
-Default: ``True``
-
-If set to ``False``, Django won't use migrations to create the test database.
 
 .. setting:: TEST_MIRROR
 
@@ -748,6 +773,20 @@ database into an in-memory JSON string before running tests (used to restore
 the database state between tests if you don't have transactions). You can set
 this to ``False`` to speed up creation time if you don't have any test classes
 with :ref:`serialized_rollback=True <test-case-serialized-rollback>`.
+
+.. setting:: TEST_TEMPLATE
+
+``TEMPLATE``
+^^^^^^^^^^^^
+
+.. versionadded:: 1.11
+
+This is a PostgreSQL-specific setting.
+
+The name of a `template`_ (e.g. ``'template0'``) from which to create the test
+database.
+
+.. _template: https://www.postgresql.org/docs/current/static/sql-createdatabase.html
 
 .. setting:: TEST_CREATE
 
@@ -795,7 +834,12 @@ Default: ``None``
 This is an Oracle-specific setting.
 
 The password to use when connecting to the Oracle database that will be used
-when running tests. If not provided, Django will use a hardcoded default value.
+when running tests. If not provided, Django will generate a random password.
+
+.. versionchanged:: 1.11
+
+    Older versions used a hardcoded default password. This was also changed
+    in 1.10.3, 1.9.11, and 1.8.16 to fix possible security implications.
 
 .. setting:: TEST_TBLSPACE
 
@@ -867,12 +911,62 @@ This is an Oracle-specific setting.
 
 The maximum size that the DATAFILE_TMP is allowed to grow to.
 
+.. setting:: DATAFILE_SIZE
+
+``DATAFILE_SIZE``
+^^^^^^^^^^^^^^^^^
+
+.. versionadded:: 2.0
+
+Default: ``'50M'``
+
+This is an Oracle-specific setting.
+
+The initial size of the DATAFILE.
+
+.. setting:: DATAFILE_TMP_SIZE
+
+``DATAFILE_TMP_SIZE``
+^^^^^^^^^^^^^^^^^^^^^
+
+.. versionadded:: 2.0
+
+Default: ``'50M'``
+
+This is an Oracle-specific setting.
+
+The initial size of the DATAFILE_TMP.
+
+.. setting:: DATAFILE_EXTSIZE
+
+``DATAFILE_EXTSIZE``
+^^^^^^^^^^^^^^^^^^^^
+
+.. versionadded:: 2.0
+
+Default: ``'25M'``
+
+This is an Oracle-specific setting.
+
+The amount by which the DATAFILE is extended when more space is required.
+
+.. setting:: DATAFILE_TMP_EXTSIZE
+
+``DATAFILE_TMP_EXTSIZE``
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. versionadded:: 2.0
+
+Default: ``'25M'``
+
+This is an Oracle-specific setting.
+
+The amount by which the DATAFILE_TMP is extended when more space is required.
+
 .. setting:: DATA_UPLOAD_MAX_MEMORY_SIZE
 
 DATA_UPLOAD_MAX_MEMORY_SIZE
 ---------------------------
-
-.. versionadded:: 1.10
 
 Default: ``2621440`` (i.e. 2.5 MB).
 
@@ -895,8 +989,6 @@ See also :setting:`FILE_UPLOAD_MAX_MEMORY_SIZE`.
 
 DATA_UPLOAD_MAX_NUMBER_FIELDS
 -----------------------------
-
-.. versionadded:: 1.10
 
 Default: ``1000``
 
@@ -1072,10 +1164,15 @@ requests being returned as "Bad Request (400)".
 
 Default: ``False``
 
-If set to True, Django's normal exception handling of view functions
-will be suppressed, and exceptions will propagate upwards.  This can
-be useful for some test setups, and should never be used on a live
-site.
+If set to ``True``, Django's exception handling of view functions
+(:data:`~django.conf.urls.handler500`, or the debug view if :setting:`DEBUG`
+is ``True``) and logging of 500 responses (:ref:`django-request-logger`) is
+skipped and exceptions propagate upwards.
+
+This can be useful for some test setups. It shouldn't be used on a live site
+unless you want your web server (instead of Django) to generate "Internal
+Server Error" responses. In that case, make sure your server doesn't show the
+stack trace or other sensitive information in the response.
 
 .. setting:: DECIMAL_SEPARATOR
 
@@ -1114,6 +1211,11 @@ Default: ``'text/html'``
 Default content type to use for all ``HttpResponse`` objects, if a MIME type
 isn't manually specified. Used with :setting:`DEFAULT_CHARSET` to construct
 the ``Content-Type`` header.
+
+.. deprecated:: 2.0
+
+    This setting is deprecated because it doesn't interact well with
+    third-party apps and is obsolete since HTML5 has mostly superseded XHTML.
 
 .. setting:: DEFAULT_EXCEPTION_REPORTER_FILTER
 
@@ -1453,7 +1555,7 @@ Monday and so on.
 .. setting:: FIXTURE_DIRS
 
 ``FIXTURE_DIRS``
------------------
+----------------
 
 Default: ``[]`` (Empty list)
 
@@ -1479,9 +1581,17 @@ of the preferred value or not supplied at all. It is also used by
 request/response cycle (e.g. in management commands and standalone scripts) to
 generate correct URLs when ``SCRIPT_NAME`` is not ``/``.
 
-.. versionchanged:: 1.10
+.. setting:: FORM_RENDERER
 
-    The setting's use in :func:`django.setup()` was added.
+``FORM_RENDERER``
+-----------------
+
+.. versionadded:: 1.11
+
+Default: ``'``:class:`django.forms.renderers.DjangoTemplates`\ ``'``
+
+The class that renders form widgets. It must implement :ref:`the low-level
+render API <low-level-widget-render-api>`.
 
 .. setting:: FORMAT_MODULE_PATH
 
@@ -1715,11 +1825,11 @@ to restrict language selection to a subset of the Django-provided languages.
 
 If you define a custom :setting:`LANGUAGES` setting, you can mark the
 language names as translation strings using the
-:func:`~django.utils.translation.ugettext_lazy` function.
+:func:`~django.utils.translation.gettext_lazy` function.
 
 Here's a sample settings file::
 
-    from django.utils.translation import ugettext_lazy as _
+    from django.utils.translation import gettext_lazy as _
 
     LANGUAGES = [
         ('de', _('German')),
@@ -1848,35 +1958,9 @@ Example: ``"http://media.example.com/"``
 ``MIDDLEWARE``
 --------------
 
-.. versionadded:: 1.10
-
-Default:: ``None``
+Default: ``None``
 
 A list of middleware to use. See :doc:`/topics/http/middleware`.
-
-.. setting:: MIDDLEWARE_CLASSES
-
-``MIDDLEWARE_CLASSES``
-----------------------
-
-.. deprecated:: 1.10
-
-    Old-style middleware that uses  ``settings.MIDDLEWARE_CLASSES`` are
-    deprecated. :ref:`Adapt old, custom middleware <upgrading-middleware>` and
-    use the :setting:`MIDDLEWARE` setting.
-
-Default::
-
-    [
-        'django.middleware.common.CommonMiddleware',
-        'django.middleware.csrf.CsrfViewMiddleware',
-    ]
-
-A list of middleware classes to use. This was the default setting used in
-Django 1.9 and earlier. Django 1.10 introduced a new style of middleware. If
-you have an older project using this setting you should :ref:`update any
-middleware you've written yourself <upgrading-middleware>` to the new style
-and then use the :setting:`MIDDLEWARE` setting.
 
 .. setting:: MIGRATION_MODULES
 
@@ -1932,7 +2016,7 @@ See :tfilter:`allowed date format strings <date>`. See also
 .. setting:: NUMBER_GROUPING
 
 ``NUMBER_GROUPING``
---------------------
+-------------------
 
 Default: ``0``
 
@@ -2002,6 +2086,10 @@ unpredictable value.
 :djadmin:`django-admin startproject <startproject>` automatically adds a
 randomly-generated ``SECRET_KEY`` to each new project.
 
+Uses of the key shouldn't assume that it's text or bytes. Every use should go
+through :func:`~django.utils.encoding.force_text` or
+:func:`~django.utils.encoding.force_bytes` to convert it to the desired type.
+
 Django will refuse to start if :setting:`SECRET_KEY` is not set.
 
 .. warning::
@@ -2021,7 +2109,7 @@ The secret key is used for:
 * All :doc:`messages </ref/contrib/messages>` if you are using
   :class:`~django.contrib.messages.storage.cookie.CookieStorage` or
   :class:`~django.contrib.messages.storage.fallback.FallbackStorage`.
-* All :func:`~django.contrib.auth.views.password_reset` tokens.
+* All :class:`~django.contrib.auth.views.PasswordResetView` tokens.
 * Any usage of :doc:`cryptographic signing </topics/signing>`, unless a
   different key is provided.
 
@@ -2064,7 +2152,7 @@ already have it.
 Default: ``False``
 
 If ``True``, the :class:`~django.middleware.security.SecurityMiddleware` adds
-the ``includeSubDomains`` tag to the :ref:`http-strict-transport-security`
+the ``includeSubDomains`` directive to the :ref:`http-strict-transport-security`
 header. It has no effect unless :setting:`SECURE_HSTS_SECONDS` is set to a
 non-zero value.
 
@@ -2072,6 +2160,20 @@ non-zero value.
     Setting this incorrectly can irreversibly (for the value of
     :setting:`SECURE_HSTS_SECONDS`) break your site. Read the
     :ref:`http-strict-transport-security` documentation first.
+
+.. setting:: SECURE_HSTS_PRELOAD
+
+``SECURE_HSTS_PRELOAD``
+-----------------------
+
+.. versionadded:: 1.11
+
+Default: ``False``
+
+If ``True``, the :class:`~django.middleware.security.SecurityMiddleware` adds
+the ``preload`` directive to the :ref:`http-strict-transport-security`
+header. It has no effect unless :setting:`SECURE_HSTS_SECONDS` is set to a
+non-zero value.
 
 .. setting:: SECURE_HSTS_SECONDS
 
@@ -2456,8 +2558,8 @@ See also :setting:`DATE_INPUT_FORMATS` and :setting:`DATETIME_INPUT_FORMATS`.
 
 Default: ``'America/Chicago'``
 
-A string representing the time zone for this installation, or ``None``. See
-the `list of time zones`_.
+A string representing the time zone for this installation. See the `list of
+time zones`_.
 
 .. note::
     Since Django was first released with the :setting:`TIME_ZONE` set to
@@ -2474,22 +2576,15 @@ will store all datetimes. When :setting:`USE_TZ` is ``True``, this is the
 default time zone that Django will use to display datetimes in templates and
 to interpret datetimes entered in forms.
 
-Django sets the ``os.environ['TZ']`` variable to the time zone you specify in
-the :setting:`TIME_ZONE` setting. Thus, all your views and models will
+On Unix environments (where :func:`time.tzset` is implemented), Django sets the
+``os.environ['TZ']`` variable to the time zone you specify in the
+:setting:`TIME_ZONE` setting. Thus, all your views and models will
 automatically operate in this time zone. However, Django won't set the ``TZ``
-environment variable under the following conditions:
-
-* If you're using the manual configuration option as described in
-  :ref:`manually configuring settings
-  <settings-without-django-settings-module>`, or
-
-* If you specify ``TIME_ZONE = None``. This will cause Django to fall back to
-  using the system timezone. However, this is discouraged when :setting:`USE_TZ
-  = True <USE_TZ>`, because it makes conversions between local time and UTC
-  less reliable.
-
-If Django doesn't set the ``TZ`` environment variable, it's up to you
-to ensure your processes are running in the correct environment.
+environment variable if you're using the manual configuration option as
+described in :ref:`manually configuring settings
+<settings-without-django-settings-module>`. If Django doesn't set the ``TZ``
+environment variable, it's up to you to ensure your processes are running in
+the correct environment.
 
 .. note::
     Django cannot reliably use alternate time zones in a Windows environment.
@@ -2505,10 +2600,15 @@ to ensure your processes are running in the correct environment.
 
 Default: ``False``
 
-A boolean that specifies whether to output the "Etag" header. This saves
-bandwidth but slows down performance. This is used by the ``CommonMiddleware``
-(see :doc:`/topics/http/middleware`) and in the``Cache Framework``
-(see :doc:`/topics/cache`).
+A boolean that specifies whether to output the ``ETag`` header. This saves
+bandwidth but slows down performance. This is used by the
+:class:`~django.middleware.common.CommonMiddleware` and in the :doc:`cache
+framework </topics/cache>`.
+
+.. deprecated:: 1.11
+
+    This setting is deprecated in favor of using ``ConditionalGetMiddleware``,
+    which sets an ETag regardless of this setting.
 
 .. setting:: USE_I18N
 
@@ -2732,8 +2832,6 @@ the URL in two places (``settings`` and URLconf).
 ``LOGOUT_REDIRECT_URL``
 -----------------------
 
-.. versionadded:: 1.10
-
 Default: ``None``
 
 The URL where requests are redirected after a user logs out using
@@ -2773,22 +2871,6 @@ Default::
         'django.contrib.auth.hashers.BCryptSHA256PasswordHasher',
         'django.contrib.auth.hashers.BCryptPasswordHasher',
     ]
-
-.. versionchanged:: 1.10
-
-    The following hashers were removed from the defaults::
-
-        'django.contrib.auth.hashers.SHA1PasswordHasher'
-        'django.contrib.auth.hashers.MD5PasswordHasher'
-        'django.contrib.auth.hashers.UnsaltedSHA1PasswordHasher'
-        'django.contrib.auth.hashers.UnsaltedMD5PasswordHasher'
-        'django.contrib.auth.hashers.CryptPasswordHasher'
-
-    Consider using a :ref:`wrapped password hasher <wrapping-password-hashers>`
-    to strengthen the hashes in your database. If that's not feasible, add this
-    setting to your project and add back any hashers that you need.
-
-    Also, the ``Argon2PasswordHasher`` was added.
 
 .. setting:: AUTH_PASSWORD_VALIDATORS
 
@@ -2944,7 +3026,7 @@ session cookie.
 HTTPOnly_ is a flag included in a Set-Cookie HTTP response header. It
 is not part of the :rfc:`2109` standard for cookies, and it isn't honored
 consistently by all browsers. However, when it is honored, it can be a
-useful way to mitigate the risk of client side script accessing the
+useful way to mitigate the risk of a client side script accessing the
 protected cookie data.
 
 Turning it on makes it less trivial for an attacker to escalate a cross-site
@@ -3101,9 +3183,10 @@ static files for deployment.
 Example: ``"/var/www/example.com/static/"``
 
 If the :doc:`staticfiles</ref/contrib/staticfiles>` contrib app is enabled
-(default) the :djadmin:`collectstatic` management command will collect static
-files into this directory. See the howto on :doc:`managing static
-files</howto/static-files/index>` for more details about usage.
+(as in the default project template), the :djadmin:`collectstatic` management
+command will collect static files into this directory. See the how-to on
+:doc:`managing static files</howto/static-files/index>` for more details about
+usage.
 
 .. warning::
 
@@ -3299,6 +3382,10 @@ File uploads
 * :setting:`MEDIA_ROOT`
 * :setting:`MEDIA_URL`
 
+Forms
+-----
+* :setting:`FORM_RENDERER`
+
 Globalization (``i18n``/``l10n``)
 ---------------------------------
 * :setting:`DATE_FORMAT`
@@ -3339,12 +3426,12 @@ HTTP
 * :setting:`FORCE_SCRIPT_NAME`
 * :setting:`INTERNAL_IPS`
 * :setting:`MIDDLEWARE`
-* :setting:`MIDDLEWARE_CLASSES`
 * Security
 
   * :setting:`SECURE_BROWSER_XSS_FILTER`
   * :setting:`SECURE_CONTENT_TYPE_NOSNIFF`
   * :setting:`SECURE_HSTS_INCLUDE_SUBDOMAINS`
+  * :setting:`SECURE_HSTS_PRELOAD`
   * :setting:`SECURE_HSTS_SECONDS`
   * :setting:`SECURE_PROXY_SSL_HEADER`
   * :setting:`SECURE_REDIRECT_EXEMPT`
@@ -3378,6 +3465,7 @@ Security
   * :setting:`CSRF_FAILURE_VIEW`
   * :setting:`CSRF_HEADER_NAME`
   * :setting:`CSRF_TRUSTED_ORIGINS`
+  * :setting:`CSRF_USE_SESSIONS`
 
 * :setting:`SECRET_KEY`
 * :setting:`X_FRAME_OPTIONS`

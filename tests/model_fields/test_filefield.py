@@ -1,4 +1,12 @@
-from django.test import TestCase
+import os
+import sys
+import unittest
+
+from django.core.files import temp
+from django.core.files.base import ContentFile
+from django.core.files.uploadedfile import TemporaryUploadedFile
+from django.db.utils import IntegrityError
+from django.test import TestCase, override_settings
 
 from .models import Document
 
@@ -50,3 +58,39 @@ class FileFieldTests(TestCase):
         d = Document.objects.create(myfile='something.txt')
         d.refresh_from_db()
         self.assertIs(d.myfile.instance, d)
+
+    def test_defer(self):
+        Document.objects.create(myfile='something.txt')
+        self.assertEqual(Document.objects.defer('myfile')[0].myfile, 'something.txt')
+
+    def test_unique_when_same_filename(self):
+        """
+        A FileField with unique=True shouldn't allow two instances with the
+        same name to be saved.
+        """
+        Document.objects.create(myfile='something.txt')
+        with self.assertRaises(IntegrityError):
+            Document.objects.create(myfile='something.txt')
+
+    @unittest.skipIf(sys.platform.startswith('win'), "Windows doesn't support moving open files.")
+    # The file's source and destination must be on the same filesystem.
+    @override_settings(MEDIA_ROOT=temp.gettempdir())
+    def test_move_temporary_file(self):
+        """
+        The temporary uploaded file is moved rather than copied to the
+        destination.
+        """
+        with TemporaryUploadedFile('something.txt', 'text/plain', 0, 'UTF-8') as tmp_file:
+            tmp_file_path = tmp_file.temporary_file_path()
+            Document.objects.create(myfile=tmp_file)
+            self.assertFalse(os.path.exists(tmp_file_path), 'Temporary file still exists')
+
+    def test_open_returns_self(self):
+        """
+        FieldField.open() returns self so it can be used as a context manager.
+        """
+        d = Document.objects.create(myfile='something.txt')
+        # Replace the FileField's file with an in-memory ContentFile, so that
+        # open() doesn't write to disk.
+        d.myfile.file = ContentFile(b'', name='bla')
+        self.assertEqual(d.myfile, d.myfile.open())

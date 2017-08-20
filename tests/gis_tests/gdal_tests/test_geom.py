@@ -1,27 +1,16 @@
 import json
+import pickle
 import unittest
 from binascii import b2a_hex
-from unittest import skipUnless
 
-from django.contrib.gis.gdal import HAS_GDAL
-from django.utils.six.moves import range
+from django.contrib.gis.gdal import (
+    CoordTransform, GDALException, OGRGeometry, OGRGeomType, OGRIndexError,
+    SpatialReference,
+)
 
 from ..test_data import TestDataMixin
 
-try:
-    from django.utils.six.moves import cPickle as pickle
-except ImportError:
-    import pickle
 
-
-if HAS_GDAL:
-    from django.contrib.gis.gdal import (
-        OGRGeometry, OGRGeomType, GDALException, OGRIndexError,
-        SpatialReference, CoordTransform, GDAL_VERSION,
-    )
-
-
-@skipUnless(HAS_GDAL, "GDAL is required")
 class OGRGeomTest(unittest.TestCase, TestDataMixin):
     "This tests the OGR Geometry."
 
@@ -94,10 +83,6 @@ class OGRGeomTest(unittest.TestCase, TestDataMixin):
         for g in self.geometries.wkt_out:
             geom = OGRGeometry(g.wkt)
             exp_gml = g.gml
-            if GDAL_VERSION >= (1, 8):
-                # In GDAL 1.8, the non-conformant GML tag  <gml:GeometryCollection> was
-                # replaced with <gml:MultiGeometry>.
-                exp_gml = exp_gml.replace('GeometryCollection', 'MultiGeometry')
             self.assertEqual(exp_gml, geom.gml)
 
     def test_hex(self):
@@ -553,3 +538,11 @@ class OGRGeomTest(unittest.TestCase, TestDataMixin):
                 '</gml:Point>'
             ),
         )
+
+    def test_empty(self):
+        self.assertIs(OGRGeometry('POINT (0 0)').empty, False)
+        self.assertIs(OGRGeometry('POINT EMPTY').empty, True)
+
+    def test_empty_point_to_geos(self):
+        p = OGRGeometry('POINT EMPTY', srs=4326)
+        self.assertEqual(p.geos.ewkt, p.ewkt)

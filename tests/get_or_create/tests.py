@@ -1,11 +1,13 @@
-from __future__ import unicode_literals
-
+import time
 import traceback
-from datetime import date
+from datetime import date, datetime, timedelta
+from threading import Thread
 
-from django.db import DatabaseError, IntegrityError
-from django.test import TestCase, TransactionTestCase, ignore_warnings
-from django.utils.encoding import DjangoUnicodeDecodeError
+from django.core.exceptions import FieldError
+from django.db import DatabaseError, IntegrityError, connection
+from django.test import (
+    SimpleTestCase, TestCase, TransactionTestCase, skipUnlessDBFeature,
+)
 
 from .models import (
     Author, Book, DefaultPerson, ManualPrimaryKeyTest, Person, Profile,
@@ -64,6 +66,17 @@ class GetOrCreateTests(TestCase):
         """
         with self.assertRaises(IntegrityError):
             Person.objects.get_or_create(first_name="Tom", last_name="Smith")
+
+    def test_get_or_create_with_pk_property(self):
+        """
+        Using the pk property of a model is allowed.
+        """
+        Thing.objects.get_or_create(pk=1)
+
+    def test_get_or_create_with_model_property_defaults(self):
+        """Using a property with a setter implemented is allowed."""
+        t, _ = Thing.objects.get_or_create(defaults={'capitalized_name_property': 'annie'}, pk=1)
+        self.assertEqual(t.name, 'Annie')
 
     def test_get_or_create_on_related_manager(self):
         p = Publisher.objects.create(name="Acme Publishing")
@@ -191,24 +204,20 @@ class GetOrCreateTestsWithManualPKs(TestCase):
             ManualPrimaryKeyTest.objects.get_or_create(id=1, data="Different")
         except IntegrityError:
             formatted_traceback = traceback.format_exc()
-            self.assertIn(str('obj.save'), formatted_traceback)
+            self.assertIn('obj.save', formatted_traceback)
 
-    # MySQL emits a warning when broken data is saved
-    @ignore_warnings(module='django.db.backends.mysql.base')
     def test_savepoint_rollback(self):
         """
-        Regression test for #20463: the database connection should still be
-        usable after a DataError or ProgrammingError in .get_or_create().
+        The database connection is still usable after a DatabaseError in
+        get_or_create() (#20463).
         """
-        try:
-            Person.objects.get_or_create(
-                birthday=date(1970, 1, 1),
-                defaults={'first_name': b"\xff", 'last_name': b"\xff"})
-        except (DatabaseError, DjangoUnicodeDecodeError):
-            Person.objects.create(
-                first_name="Bob", last_name="Ross", birthday=date(1950, 1, 1))
-        else:
-            self.skipTest("This backend accepts broken utf-8.")
+        Tag.objects.create(text='foo')
+        with self.assertRaises(DatabaseError):
+            # pk 123456789 doesn't exist, so the tag object will be created.
+            # Saving triggers a unique constraint violation on 'text'.
+            Tag.objects.get_or_create(pk=123456789, defaults={'text': 'foo'})
+        # Tag objects can be created after the error.
+        Tag.objects.create(text='bar')
 
     def test_get_or_create_empty(self):
         """
@@ -318,6 +327,17 @@ class UpdateOrCreateTests(TestCase):
             ManualPrimaryKeyTest.objects.update_or_create(id=1, data="Different")
         self.assertEqual(ManualPrimaryKeyTest.objects.get(id=1).data, "Original")
 
+    def test_with_pk_property(self):
+        """
+        Using the pk property of a model is allowed.
+        """
+        Thing.objects.update_or_create(pk=1)
+
+    def test_update_or_create_with_model_property_defaults(self):
+        """Using a property with a setter implemented is allowed."""
+        t, _ = Thing.objects.get_or_create(defaults={'capitalized_name_property': 'annie'}, pk=1)
+        self.assertEqual(t.name, 'Annie')
+
     def test_error_contains_full_traceback(self):
         """
         update_or_create should raise IntegrityErrors with the full traceback.
@@ -404,9 +424,111 @@ class UpdateOrCreateTests(TestCase):
         self.assertFalse(created)
         self.assertEqual(obj.defaults, 'another testing')
 
-    def test_update_callable_default(self):
+    def test_create_callable_default(self):
         obj, created = Person.objects.update_or_create(
             first_name='George', last_name='Harrison',
             defaults={'birthday': lambda: date(1943, 2, 25)},
         )
+        self.assertIs(created, True)
         self.assertEqual(obj.birthday, date(1943, 2, 25))
+
+    def test_update_callable_default(self):
+        Person.objects.update_or_create(
+            first_name='George', last_name='Harrison', birthday=date(1942, 2, 25),
+        )
+        obj, created = Person.objects.update_or_create(
+            first_name='George',
+            defaults={'last_name': lambda: 'NotHarrison'},
+        )
+        self.assertIs(created, False)
+        self.assertEqual(obj.last_name, 'NotHarrison')
+
+
+class UpdateOrCreateTransactionTests(TransactionTestCase):
+    available_apps = ['get_or_create']
+
+    @skipUnlessDBFeature('has_select_for_update')
+    @skipUnlessDBFeature('supports_transactions')
+    def test_updates_in_transaction(self):
+        """
+        Objects are selected and updated in a transaction to avoid race
+        conditions. This test forces update_or_create() to hold the lock
+        in another thread for a relatively long time so that it can update
+        while it holds the lock. The updated field isn't a field in 'defaults',
+        so update_or_create() shouldn't have an effect on it.
+        """
+        lock_status = {'has_grabbed_lock': False}
+
+        def birthday_sleep():
+            lock_status['has_grabbed_lock'] = True
+            time.sleep(0.5)
+            return date(1940, 10, 10)
+
+        def update_birthday_slowly():
+            Person.objects.update_or_create(
+                first_name='John', defaults={'birthday': birthday_sleep}
+            )
+            # Avoid leaking connection for Oracle
+            connection.close()
+
+        def lock_wait():
+            # timeout after ~0.5 seconds
+            for i in range(20):
+                time.sleep(0.025)
+                if lock_status['has_grabbed_lock']:
+                    return True
+            return False
+
+        Person.objects.create(first_name='John', last_name='Lennon', birthday=date(1940, 10, 9))
+
+        # update_or_create in a separate thread
+        t = Thread(target=update_birthday_slowly)
+        before_start = datetime.now()
+        t.start()
+
+        if not lock_wait():
+            self.skipTest('Database took too long to lock the row')
+
+        # Update during lock
+        Person.objects.filter(first_name='John').update(last_name='NotLennon')
+        after_update = datetime.now()
+
+        # Wait for thread to finish
+        t.join()
+
+        # The update remains and it blocked.
+        updated_person = Person.objects.get(first_name='John')
+        self.assertGreater(after_update - before_start, timedelta(seconds=0.5))
+        self.assertEqual(updated_person.last_name, 'NotLennon')
+
+
+class InvalidCreateArgumentsTests(SimpleTestCase):
+    msg = "Invalid field name(s) for model Thing: 'nonexistent'."
+
+    def test_get_or_create_with_invalid_defaults(self):
+        with self.assertRaisesMessage(FieldError, self.msg):
+            Thing.objects.get_or_create(name='a', defaults={'nonexistent': 'b'})
+
+    def test_get_or_create_with_invalid_kwargs(self):
+        with self.assertRaisesMessage(FieldError, self.msg):
+            Thing.objects.get_or_create(name='a', nonexistent='b')
+
+    def test_update_or_create_with_invalid_defaults(self):
+        with self.assertRaisesMessage(FieldError, self.msg):
+            Thing.objects.update_or_create(name='a', defaults={'nonexistent': 'b'})
+
+    def test_update_or_create_with_invalid_kwargs(self):
+        with self.assertRaisesMessage(FieldError, self.msg):
+            Thing.objects.update_or_create(name='a', nonexistent='b')
+
+    def test_multiple_invalid_fields(self):
+        with self.assertRaisesMessage(FieldError, "Invalid field name(s) for model Thing: 'invalid', 'nonexistent'"):
+            Thing.objects.update_or_create(name='a', nonexistent='b', defaults={'invalid': 'c'})
+
+    def test_property_attribute_without_setter_defaults(self):
+        with self.assertRaisesMessage(FieldError, "Invalid field name(s) for model Thing: 'name_in_all_caps'"):
+            Thing.objects.update_or_create(name='a', defaults={'name_in_all_caps': 'FRANK'})
+
+    def test_property_attribute_without_setter_kwargs(self):
+        with self.assertRaisesMessage(FieldError, "Invalid field name(s) for model Thing: 'name_in_all_caps'"):
+            Thing.objects.update_or_create(name_in_all_caps='FRANK', defaults={'name': 'Frank'})

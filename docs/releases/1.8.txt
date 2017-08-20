@@ -61,7 +61,7 @@ built-in support for the Django template language and for
 :class:`~django.template.backends.jinja2.Jinja2`. It supports rendering
 templates with multiple engines within the same project. Learn more about the
 new features in the :doc:`topic guide </topics/templates>` and check the
-:doc:`upgrade instructions </ref/templates/upgrading>` for details.
+upgrade instructions in older versions of the documentation.
 
 Security enhancements
 ---------------------
@@ -225,10 +225,10 @@ Minor features
 * It is now allowed to include a subquery as a geographic lookup argument, for
   example ``City.objects.filter(point__within=Country.objects.filter(continent='Africa').values('mpoly'))``.
 
-* The Spatialite backend now supports ``Collect`` and ``Extent`` aggregates
+* The SpatiaLite backend now supports ``Collect`` and ``Extent`` aggregates
   when the database version is 3.0 or later.
 
-* The PostGIS 2 ``CREATE EXTENSION postgis`` and the Spatialite
+* The PostGIS 2 ``CREATE EXTENSION postgis`` and the SpatiaLite
   ``SELECT InitSpatialMetaData`` initialization commands are now automatically
   run by :djadmin:`migrate`.
 
@@ -445,7 +445,7 @@ Management Commands
   :setting:`FIXTURE_DIRS` contains duplicates or a default fixture directory
   path (``app_name/fixtures``), an exception is raised.
 
-* The new :option:`makemigrations --exit` option allows exiting with an error
+* The new ``makemigrations --exit`` option allows exiting with an error
   code if no migrations are created.
 
 * The new :djadmin:`showmigrations` command allows listing all migrations and
@@ -1187,7 +1187,7 @@ Miscellaneous
   Be careful if you upgrade to Django 1.8 and skip Django 1.7. If you run
   ``manage.py migrate --fake``, this migration will be skipped and you'll see
   a ``RuntimeError: Error creating new content types.`` exception because the
-  ``name`` column won't be dropped from the database. Use ``migrate.py migrate
+  ``name`` column won't be dropped from the database. Use ``manage.py migrate
   --fake-initial`` to fake only the initial migration instead.
 
 * The new :option:`migrate --fake-initial` option allows faking initial
@@ -1477,9 +1477,13 @@ It's a legacy option that should no longer be necessary.
 will be removed in Django 1.10. Historically, it was used to handle fields where
 type conversion was needed when loading from the database, but it was not used
 in ``.values()`` calls or in aggregates. It has been replaced with
-:meth:`~django.db.models.Field.from_db_value`. Note that the new approach does
-not call the :meth:`~django.db.models.Field.to_python` method on assignment
-as was the case with ``SubfieldBase``.
+:meth:`~django.db.models.Field.from_db_value`.
+
+The new approach doesn't call the :meth:`~django.db.models.Field.to_python`
+method on assignment as was the case with ``SubfieldBase``. If you need that
+behavior, reimplement the ``Creator`` class `from Django's source code
+<https://github.com/django/django/blob/stable/1.8.x/django/db/models/fields/subclassing.py#L31-L44>`_
+in your project.
 
 ``django.utils.checksums``
 --------------------------
@@ -1517,9 +1521,6 @@ Both classes provide a ``render()`` method, however, the former takes a
 :class:`django.template.Context` as an argument while the latter expects a
 :class:`dict`. This change is enforced through a deprecation path for Django
 templates.
-
-Since it's easier to understand with examples, the :ref:`upgrade guide
-<get_template-upgrade-django-18>` shows how to adapt affected code.
 
 All this also applies to :func:`~django.template.loader.select_template()`.
 
@@ -1637,7 +1638,7 @@ Using ``AuthenticationMiddleware`` without ``SessionAuthenticationMiddleware``
 added in Django 1.7. In Django 1.7.2, its functionality was moved to
 ``auth.get_user()`` and, for backwards compatibility, enabled only if
 ``'django.contrib.auth.middleware.SessionAuthenticationMiddleware'`` appears in
-:setting:`MIDDLEWARE_CLASSES`.
+``MIDDLEWARE_CLASSES``.
 
 In Django 1.10, session verification will be enabled regardless of whether or not
 ``SessionAuthenticationMiddleware`` is enabled (at which point
@@ -1713,9 +1714,9 @@ After switching to the new signature the router will also be called by the
 Features removed in 1.8
 =======================
 
-These features have reached the end of their deprecation cycle and so have been
-removed in Django 1.8 (please see the :ref:`deprecation timeline
-<deprecation-removed-in-1.8>` for more details):
+These features have reached the end of their deprecation cycle and are removed
+in Django 1.8. See :ref:`deprecated-features-1.6` for details, including how to
+remove usage of these features.
 
 * ``django.contrib.comments`` is removed.
 

@@ -4,6 +4,8 @@ Coding style
 
 Please follow these coding standards when writing code for inclusion in Django.
 
+.. _coding-style-python:
+
 Python style
 ============
 
@@ -31,25 +33,54 @@ Python style
 
 * Use four spaces for indentation.
 
+* Use four space hanging indentation rather than vertical alignment::
+
+    raise AttributeError(
+        'Here is a multine error message '
+        'shortened for clarity.'
+    )
+
+  Instead of::
+
+      raise AttributeError('Here is a multine error message '
+                           'shortened for clarity.')
+
+  This makes better use of space and avoids having to realign strings if the
+  length of the first line changes.
+
+* Use single quotes for strings, or a double quote if the the string contains a
+  single quote. Don't waste time doing unrelated refactoring of existing code
+  to conform to this style.
+
+* Avoid use of "we" in comments, e.g. "Loop over" rather than "We loop over".
+
 * Use underscores, not camelCase, for variable, function and method names
-  (i.e. ``poll.get_unique_voters()``, not ``poll.getUniqueVoters``).
+  (i.e. ``poll.get_unique_voters()``, not ``poll.getUniqueVoters()``).
 
 * Use ``InitialCaps`` for class names (or for factory functions that
   return classes).
 
-* In docstrings, follow :pep:`257`. For example::
-
-      def foo():
-          """
-          Calculate something and return the result.
-          """
-          ...
+* In docstrings, follow the style of existing docstrings and :pep:`257`.
 
 * In tests, use :meth:`~django.test.SimpleTestCase.assertRaisesMessage` instead
   of :meth:`~unittest.TestCase.assertRaises` so you can check the exception
-  message. Use :meth:`~unittest.TestCase.assertRaisesRegex`
-  (``six.assertRaisesRegex()`` as long as we support Python 2) only if you need
-  to use regular expression matching.
+  message. Use :meth:`~unittest.TestCase.assertRaisesRegex` only if you need
+  regular expression matching.
+
+* In test docstrings, state the expected behavior that each test demonstrates.
+  Don't include preambles such as "Tests that" or "Ensures that".
+
+  Reserve ticket references for obscure issues where the ticket has additional
+  details that can't be easily described in docstrings or comments. Include the
+  ticket number at the end of a sentence like this::
+
+    def test_foo():
+        """
+        A test docstring looks like this (#123456).
+        """
+        ...
+
+.. _coding-style-imports:
 
 Imports
 =======
@@ -113,14 +144,14 @@ Imports
 
       # try/except
       try:
-          import pytz
+          import yaml
       except ImportError:
-          pytz = None
+          yaml = None
 
       CONSTANT = 'foo'
 
 
-      class Example(object):
+      class Example:
           # ...
 
 * Use convenience imports whenever available. For example, do this::
@@ -211,10 +242,6 @@ Model style
 
           first_name = models.CharField(max_length=20)
           last_name = models.CharField(max_length=40)
-
-* If you define a ``__str__`` method (previously ``__unicode__`` before Python 3
-  was supported), decorate the model class with
-  :func:`~django.utils.encoding.python_2_unicode_compatible`.
 
 * The order of model inner classes and standard methods should be as
   follows (noting that these are not all required):
